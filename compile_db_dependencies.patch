@@ -1,0 +1,413 @@
+diff --git a/clang/include/clang/Tooling/CompilationDatabase.h b/clang/include/clang/Tooling/CompilationDatabase.h
+index b28a8a6d6e5..09042ce3715 100644
+--- a/clang/include/clang/Tooling/CompilationDatabase.h
++++ b/clang/include/clang/Tooling/CompilationDatabase.h
+@@ -42,12 +42,29 @@ namespace tooling {
+ 
+ /// Specifies the working directory and command of a compilation.
+ struct CompileCommand {
++
++  /// This is intended to provide an additional info that should help infering
++  /// compile command for files not directly present in compilation database
++  struct Dependency
++  {
++    std::string Filename;
++    std::vector<std::string> RemoveArgs;
++    std::vector<std::string> AddArgs;
++  };
++
+   CompileCommand() = default;
+   CompileCommand(Twine Directory, Twine Filename,
+                  std::vector<std::string> CommandLine, Twine Output)
+       : Directory(Directory.str()), Filename(Filename.str()),
+         CommandLine(std::move(CommandLine)), Output(Output.str()){}
+ 
++  CompileCommand(Twine Directory, Twine Filename,
++                 std::vector<std::string> CommandLine, Twine Output,
++                 std::vector<Dependency> Dependencies)
++      : CompileCommand(Directory, Filename, std::move(CommandLine), Output) { this->Dependencies = std::move(Dependencies); }
++
++  void ApplyDependency(const Dependency &d);
++
+   /// The working directory the command was executed from.
+   std::string Directory;
+ 
+@@ -65,6 +82,9 @@ struct CompileCommand {
+   /// e.g. "inferred from foo/bar.h".
+   std::string Heuristic;
+ 
++  std::vector<Dependency> Dependencies;
++  int DependencyIndex = -1;
++
+   friend bool operator==(const CompileCommand &LHS, const CompileCommand &RHS) {
+     return LHS.Directory == RHS.Directory && LHS.Filename == RHS.Filename &&
+            LHS.CommandLine == RHS.CommandLine && LHS.Output == RHS.Output &&
+diff --git a/clang/include/clang/Tooling/JSONCompilationDatabase.h b/clang/include/clang/Tooling/JSONCompilationDatabase.h
+index 96582457c63..c77a1860022 100644
+--- a/clang/include/clang/Tooling/JSONCompilationDatabase.h
++++ b/clang/include/clang/Tooling/JSONCompilationDatabase.h
+@@ -105,6 +105,7 @@ private:
+   /// failed.
+   bool parse(std::string &ErrorMessage);
+ 
++  using DepsShared = std::shared_ptr<std::vector<CompileCommand::Dependency>>;
+   // Tuple (directory, filename, commandline, output) where 'commandline'
+   // points to the corresponding scalar nodes in the YAML stream.
+   // If the command line contains a single argument, it is a shell-escaped
+@@ -115,11 +116,13 @@ private:
+   using CompileCommandRef =
+       std::tuple<llvm::yaml::ScalarNode *, llvm::yaml::ScalarNode *,
+                  std::vector<llvm::yaml::ScalarNode *>,
+-                 llvm::yaml::ScalarNode *>;
++                 llvm::yaml::ScalarNode *, DepsShared>;
+ 
+   /// Converts the given array of CompileCommandRefs to CompileCommands.
+   void getCommands(ArrayRef<CompileCommandRef> CommandsRef,
+                    std::vector<CompileCommand> &Commands) const;
++  
++  void inferFromDependent(StringRef FilePath, std::vector<CompileCommand> &Commands) const;
+ 
+   // Maps file paths to the compile command lines for that file.
+   llvm::StringMap<std::vector<CompileCommandRef>> IndexByFile;
+diff --git a/clang/lib/Tooling/CompilationDatabase.cpp b/clang/lib/Tooling/CompilationDatabase.cpp
+index 2b4c26dab96..5c4d2f8b273 100644
+--- a/clang/lib/Tooling/CompilationDatabase.cpp
++++ b/clang/lib/Tooling/CompilationDatabase.cpp
+@@ -58,6 +58,33 @@ using namespace tooling;
+ 
+ LLVM_INSTANTIATE_REGISTRY(CompilationDatabasePluginRegistry)
+ 
++void CompileCommand::ApplyDependency(const Dependency &d)
++{
++  for (const std::string &arg : d.RemoveArgs) {
++    const char *pArg = arg.c_str();
++    int skip = 0;
++    //llvm::errs() << "JSON DB: attempting to remove " << arg << "\n";
++    if (pArg[0] >= '0' && pArg[0] <= '9' && pArg[1] == ':') {
++      skip = pArg[0] - '0';
++      pArg += 2;
++    }
++    //llvm::errs() << "JSON DB: 2 attempting to remove:" << pArg << ";skipping "
++                 //<< skip << "\n";
++    auto it = std::find_if(CommandLine.begin(), CommandLine.end(),
++                           [&](const std::string &xarg) {
++                             return strstr(xarg.c_str(), pArg) == xarg.c_str();
++                           });
++    if (it != CommandLine.end()) {
++      //llvm::errs() << "JSON DB: removing found option " << arg
++                   //<< " and skipping " << skip << "\n";
++      CommandLine.erase(it, it + skip + 1);
++    }
++  }
++  if (!d.AddArgs.empty())
++    CommandLine.insert(CommandLine.end(), d.AddArgs.begin(),
++                           d.AddArgs.end());
++}
++
+ CompilationDatabase::~CompilationDatabase() = default;
+ 
+ std::unique_ptr<CompilationDatabase>
+diff --git a/clang/lib/Tooling/InterpolatingCompilationDatabase.cpp b/clang/lib/Tooling/InterpolatingCompilationDatabase.cpp
+index fa61560e512..682781c7157 100644
+--- a/clang/lib/Tooling/InterpolatingCompilationDatabase.cpp
++++ b/clang/lib/Tooling/InterpolatingCompilationDatabase.cpp
+@@ -424,38 +424,63 @@ private:
+       int Points;
+       size_t PrefixLength;
+     };
+-    // Choose the best candidate by (preferred, points, prefix length, alpha).
+-    ScoredCandidate Best = {size_t(-1), false, 0, 0};
+-    for (const auto &Candidate : Candidates) {
+-      ScoredCandidate S;
+-      S.Index = Candidate.first;
+-      S.Preferred = PreferredLanguage == types::TY_INVALID ||
+-                    PreferredLanguage == Types[S.Index];
+-      S.Points = Candidate.second;
++    StringRef extOrig = llvm::sys::path::extension(Filename);
++    auto BetterThan = [&](ScoredCandidate &S, ScoredCandidate const &Best){
+       if (!S.Preferred && Best.Preferred)
+-        continue;
++        return false;
+       if (S.Preferred == Best.Preferred) {
+         if (S.Points < Best.Points)
+-          continue;
++          return false;
+         if (S.Points == Best.Points) {
+           S.PrefixLength = matchingPrefix(Filename, Paths[S.Index].first);
+           if (S.PrefixLength < Best.PrefixLength)
+-            continue;
++            return false;
+           // hidden heuristics should at least be deterministic!
+           if (S.PrefixLength == Best.PrefixLength)
+             if (S.Index > Best.Index)
+-              continue;
++              return false;
++        }
++      }
++
++      return true;
++    };
++    // Choose the best candidate by (preferred, points, prefix length, alpha).
++    ScoredCandidate Best = {size_t(-1), false, 0, 0};
++    ScoredCandidate BestExt = {size_t(-1), false, 0, 0};
++
++    for (const auto &Candidate : Candidates) {
++      ScoredCandidate S;
++      S.Index = Candidate.first;
++      S.Preferred = PreferredLanguage == types::TY_INVALID ||
++                    PreferredLanguage == Types[S.Index];
++      S.Points = Candidate.second;
++      if (BetterThan(S, Best))
++      {
++        // PrefixLength was only set above if actually needed for a tiebreak.
++        // But it definitely needs to be set to break ties in the future.
++        S.PrefixLength = matchingPrefix(Filename, Paths[S.Index].first);
++        Best = S;
++      }
++      StringRef sExt = llvm::sys::path::extension(Paths[S.Index].first);
++      if (sExt == extOrig)
++      {
++        if (BetterThan(S, BestExt)) {
++          // PrefixLength was only set above if actually needed for a tiebreak.
++          // But it definitely needs to be set to break ties in the future.
++          S.PrefixLength = matchingPrefix(Filename, Paths[S.Index].first);
++          BestExt = S;
+         }
+       }
+-      // PrefixLength was only set above if actually needed for a tiebreak.
+-      // But it definitely needs to be set to break ties in the future.
+-      S.PrefixLength = matchingPrefix(Filename, Paths[S.Index].first);
+-      Best = S;
+     }
+     // Edge case: no candidate got any points.
+     // We ignore PreferredLanguage at this point (not ideal).
+     if (Best.Index == size_t(-1))
+       return {longestMatch(Filename, Paths).second, 0};
++
++    //prefer with matched extension
++    if (BestExt.Index != size_t(-1))
++      return {BestExt.Index, BestExt.Points};
++
+     return {Best.Index, Best.Points};
+   }
+ 
+@@ -512,7 +537,18 @@ public:
+   getCompileCommands(StringRef Filename) const override {
+     auto Known = Inner->getCompileCommands(Filename);
+     if (Index.empty() || !Known.empty())
++    {
++      for(CompileCommand &cc : Known)
++      {
++        if (cc.DependencyIndex >= 0)
++        {
++          CompileCommand trans = TransferableCommand(cc).transferTo(Filename);
++          trans.ApplyDependency(cc.Dependencies[cc.DependencyIndex]);
++          cc = trans;
++        }
++      }
+       return Known;
++    }
+     bool TypeCertain;
+     auto Lang = guessType(Filename, &TypeCertain);
+     if (!TypeCertain)
+@@ -521,7 +557,13 @@ public:
+         Inner->getCompileCommands(Index.chooseProxy(Filename, foldType(Lang)));
+     if (ProxyCommands.empty())
+       return {};
+-    return {TransferableCommand(ProxyCommands[0]).transferTo(Filename)};
++
++    CompileCommand &proxy = ProxyCommands[0];
++    CompileCommand trans = TransferableCommand(proxy).transferTo(Filename);
++    if (proxy.DependencyIndex >= 0)
++      trans.ApplyDependency(proxy.Dependencies[proxy.DependencyIndex]);
++
++    return {trans};
+   }
+ 
+   std::vector<std::string> getAllFiles() const override {
+diff --git a/clang/lib/Tooling/JSONCompilationDatabase.cpp b/clang/lib/Tooling/JSONCompilationDatabase.cpp
+index 67a42d3c55a..e2df0a00a11 100644
+--- a/clang/lib/Tooling/JSONCompilationDatabase.cpp
++++ b/clang/lib/Tooling/JSONCompilationDatabase.cpp
+@@ -236,10 +236,25 @@ JSONCompilationDatabase::getCompileCommands(StringRef FilePath) const {
+   if (Match.empty())
+     return {};
+   const auto CommandsRefI = IndexByFile.find(Match);
++
+   if (CommandsRefI == IndexByFile.end())
+     return {};
++
+   std::vector<CompileCommand> Commands;
+   getCommands(CommandsRefI->getValue(), Commands);
++  for (CompileCommand &cc : Commands) {
++    StringRef ccfn = cc.Filename;
++    if (!ccfn.endswith(FilePath)) {
++      for (size_t i = 0; i < cc.Dependencies.size(); ++i) {
++        CompileCommand::Dependency const &d = cc.Dependencies[i];
++        StringRef fn = d.Filename;
++        if (fn.endswith(FilePath)) {
++          cc.DependencyIndex = (int)i;
++          break;
++        }
++      }
++    }
++  }
+   return Commands;
+ }
+ 
+@@ -312,6 +327,65 @@ nodeToCommandLine(JSONCommandLineSyntax Syntax,
+   return Arguments;
+ }
+ 
++static bool ParseCompileCommandDependency(llvm::yaml::MappingNode *pNode, CompileCommand::Dependency &d)
++{
++  for (auto &depKeyValue : *pNode) {
++    auto *KeyString = dyn_cast<llvm::yaml::ScalarNode>(depKeyValue.getKey());
++    if (!KeyString) {
++      return false;
++    }
++    SmallString<10> KeyStorage;
++    StringRef KeyValue = KeyString->getValue(KeyStorage);
++    llvm::yaml::Node *Value = depKeyValue.getValue();
++    if (!Value) {
++      return false;
++    }
++    auto *ValueString = dyn_cast<llvm::yaml::ScalarNode>(Value);
++    auto *SequenceString = dyn_cast<llvm::yaml::SequenceNode>(Value);
++    if (KeyValue == "file") {
++      if (!ValueString) {
++        return false;
++      }
++      SmallString<10> FileStorage;
++      StringRef FilenameValue = ValueString->getValue(FileStorage);
++      d.Filename = FilenameValue.str();
++    } else if (KeyValue == "add" || KeyValue == "remove") {
++      if (!SequenceString) {
++        return false;
++      }
++      std::vector<std::string> &v =
++          KeyValue == "add" ? d.AddArgs : d.RemoveArgs;
++      for (auto &Argument : *SequenceString) {
++        auto *Scalar = dyn_cast<llvm::yaml::ScalarNode>(&Argument);
++        if (!Scalar) {
++          return false;
++        }
++        SmallString<10> ArgStorage;
++        StringRef ArgValue = Scalar->getValue(ArgStorage);
++        v.push_back(ArgValue.str());
++      }
++    }
++  }
++  return true;
++}
++
++static bool ParseCompileCommandDependencies(llvm::yaml::SequenceNode *pDeps, std::vector<CompileCommand::Dependency> &deps)
++{
++  bool res = true;
++  for (auto &depNode : *pDeps) {
++    auto *Dep = dyn_cast<llvm::yaml::MappingNode>(&depNode);
++    if (!Dep) {
++      return false;
++    }
++    CompileCommand::Dependency d;
++    if (ParseCompileCommandDependency(Dep, d))
++      deps.push_back(std::move(d));
++    else
++      res = false;
++  }
++  return res;
++}
++
+ void JSONCompilationDatabase::getCommands(
+     ArrayRef<CompileCommandRef> CommandsRef,
+     std::vector<CompileCommand> &Commands) const {
+@@ -320,11 +394,16 @@ void JSONCompilationDatabase::getCommands(
+     SmallString<32> FilenameStorage;
+     SmallString<32> OutputStorage;
+     auto Output = std::get<3>(CommandRef);
++    std::vector<CompileCommand::Dependency> deps;
++    auto depsShared = std::get<4>(CommandRef);
++    if (depsShared.get()) deps = *depsShared;
++
+     Commands.emplace_back(
+         std::get<0>(CommandRef)->getValue(DirectoryStorage),
+         std::get<1>(CommandRef)->getValue(FilenameStorage),
+         nodeToCommandLine(Syntax, std::get<2>(CommandRef)),
+-        Output ? Output->getValue(OutputStorage) : "");
++        Output ? Output->getValue(OutputStorage) : "",
++        std::move(deps));
+   }
+ }
+ 
+@@ -354,6 +433,8 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
+     llvm::Optional<std::vector<llvm::yaml::ScalarNode *>> Command;
+     llvm::yaml::ScalarNode *File = nullptr;
+     llvm::yaml::ScalarNode *Output = nullptr;
++    DepsShared Dependencies;
++
+     for (auto& NextKeyValue : *Object) {
+       auto *KeyString = dyn_cast<llvm::yaml::ScalarNode>(NextKeyValue.getKey());
+       if (!KeyString) {
+@@ -383,6 +464,13 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
+           }
+           Command->push_back(Scalar);
+         }
++      } else if (KeyValue == "dependencies") {
++        if (!SequenceString) {
++          ErrorMessage = "Expected sequence as value.";
++          return false;
++        }
++        Dependencies.reset(new std::vector<CompileCommand::Dependency>());
++        ParseCompileCommandDependencies(SequenceString, *Dependencies);
+       } else {
+         if (!ValueString) {
+           ErrorMessage = "Expected string as value.";
+@@ -418,21 +506,35 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
+     }
+     SmallString<8> FileStorage;
+     StringRef FileName = File->getValue(FileStorage);
+-    SmallString<128> NativeFilePath;
+-    if (llvm::sys::path::is_relative(FileName)) {
+-      SmallString<8> DirectoryStorage;
+-      SmallString<128> AbsolutePath(
+-          Directory->getValue(DirectoryStorage));
+-      llvm::sys::path::append(AbsolutePath, FileName);
+-      llvm::sys::path::remove_dots(AbsolutePath, /*remove_dot_dot=*/ true);
+-      llvm::sys::path::native(AbsolutePath, NativeFilePath);
+-    } else {
+-      llvm::sys::path::native(FileName, NativeFilePath);
+-    }
+-    auto Cmd = CompileCommandRef(Directory, File, *Command, Output);
++    auto FileNameToNative = [&Directory](StringRef FileName)->SmallString<128>
++    {
++      SmallString<128> NativeFilePath;
++      if (llvm::sys::path::is_relative(FileName)) {
++        SmallString<8> DirectoryStorage;
++        SmallString<128> AbsolutePath(
++            Directory->getValue(DirectoryStorage));
++        llvm::sys::path::append(AbsolutePath, FileName);
++        llvm::sys::path::remove_dots(AbsolutePath, /*remove_dot_dot=*/ true);
++        llvm::sys::path::native(AbsolutePath, NativeFilePath);
++      } else {
++        llvm::sys::path::native(FileName, NativeFilePath);
++      }
++      return NativeFilePath;
++    };
++    SmallString<128> NativeFilePath = FileNameToNative(FileName);
++
++    auto Cmd = CompileCommandRef(Directory, File, *Command, Output, Dependencies);
+     IndexByFile[NativeFilePath].push_back(Cmd);
+-    AllCommands.push_back(Cmd);
+     MatchTrie.insert(NativeFilePath);
++    if (Dependencies.get())
++    {
++      for (CompileCommand::Dependency const &d : *Dependencies) {
++        SmallString<128> NativeFilePathDep = FileNameToNative(d.Filename);
++        IndexByFile[NativeFilePathDep].push_back(Cmd);
++        MatchTrie.insert(NativeFilePathDep);
++      }
++    }
++    AllCommands.push_back(Cmd);
+   }
+   return true;
+ }

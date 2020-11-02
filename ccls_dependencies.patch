@@ -1,0 +1,140 @@
+diff --git a/src/project.cc b/src/project.cc
+index 23fd67e..2819c04 100644
+--- a/src/project.cc
++++ b/src/project.cc
+@@ -450,6 +450,22 @@ void Project::loadDirectory(const std::string &root, Project::Folder &folder) {
+           entry.args.push_back(intern(args[i]));
+       }
+       entry.compdb_size = entry.args.size();
++      entry.dependencies.reserve(cmd.Dependencies.size());
++
++      for(auto &d : cmd.Dependencies)
++      {
++        Entry::Depend dep;
++        dep.filename = d.Filename;
++        dep.add_args.reserve(d.AddArgs.size());
++        for(auto &arg : d.AddArgs)
++          dep.add_args.push_back(intern(arg));
++
++        dep.remove_args.reserve(d.RemoveArgs.size());
++        for(auto &arg : d.RemoveArgs)
++          dep.remove_args.push_back(intern(arg));
++
++        entry.dependencies.push_back(std::move(dep));
++      }
+ 
+       // Work around relative --sysroot= as it isn't affected by
+       // -working-directory=. chdir is thread hostile but this function runs
+@@ -502,6 +518,7 @@ Project::Entry Project::findEntry(const std::string &path, bool can_redirect,
+   bool match = false, exact_match = false;
+   const Entry *best = nullptr;
+   Project::Folder *best_compdb_folder = nullptr;
++  int bestDependencyIndex = -1;
+ 
+   Project::Entry ret;
+   std::lock_guard lock(mtx);
+@@ -555,20 +572,29 @@ Project::Entry Project::findEntry(const std::string &path, bool can_redirect,
+       // Infer args from a similar path.
+       int best_score = INT_MIN;
+       auto [lang, header] = lookupExtension(path);
++      auto const& lng = lang;
++      auto const& hdr = header;
++
++      auto checkEntry = [&](Folder &folder, const Entry& e, const std::string &fname, int depIdx = -1){
++          int score = computeGuessScore(path, fname);
++          // Decrease score if .c is matched against .hh
++          auto [lang1, header1] = lookupExtension(fname);
++          if (lng != lang1 && !(lng == LanguageId::C && hdr))
++            score -= 30;
++          if (score > best_score) {
++            best_score = score;
++            best_compdb_folder = &folder;
++            best = &e;
++            bestDependencyIndex = depIdx;
++          }
++      };
+       for (auto &[root, folder] : root2folder)
+         if (StringRef(path).startswith(root))
+           for (const Entry &e : folder.entries)
+             if (e.compdb_size) {
+-              int score = computeGuessScore(path, e.filename);
+-              // Decrease score if .c is matched against .hh
+-              auto [lang1, header1] = lookupExtension(e.filename);
+-              if (lang != lang1 && !(lang == LanguageId::C && header))
+-                score -= 30;
+-              if (score > best_score) {
+-                best_score = score;
+-                best_compdb_folder = &folder;
+-                best = &e;
+-              }
++              checkEntry(folder, e, e.filename, -1);
++              for(int i = 0; i < e.dependencies.size(); ++i)
++                checkEntry(folder, e, e.dependencies[i].filename, i);
+             }
+       ret.is_inferred = true;
+     }
+@@ -586,6 +612,42 @@ Project::Entry Project::findEntry(const std::string &path, bool can_redirect,
+         ret.args.resize(best->compdb_size);
+       else
+         best_dot_ccls_args = nullptr;
++
++      if (bestDependencyIndex != -1)
++      {
++        const auto &dep = best->dependencies[bestDependencyIndex];
++        if (!dep.remove_args.empty())
++        {
++          for(const char *pRA : dep.remove_args)
++          {
++            //expecting format: [0-9]:<actual argument to remove>
++            int skip = 0;
++            if (pRA[0] >= '0' && pRA[0] <= '9' && pRA[1] == ':')
++            {
++              skip = pRA[0] - '0';
++              pRA += 2;
++            }
++            auto it = std::find_if(ret.args.begin(), ret.args.end(),
++                                   [&](const char *pArg) {
++                                     return strstr(pArg, pRA) == pArg;
++                                   });
++            if (it != ret.args.end())
++              ret.args.erase(it, it + skip + 1);
++          }
++        }
++
++        if (!dep.add_args.empty())
++          ret.args.insert(ret.args.end(), dep.add_args.begin(), dep.add_args.end());
++      }
++
++      if (ret.is_inferred)
++      {
++        LOG_S(INFO) << "inferred for '" << path << "' from '"<<best->filename<<"'";
++        if (bestDependencyIndex != -1)
++        {
++          LOG_S(INFO) << "using dependency: '" << best->dependencies[bestDependencyIndex].filename << "'";
++        }
++      }
+     }
+     ret.filename = path;
+   }
+diff --git a/src/project.hh b/src/project.hh
+index f43419f..5784123 100644
+--- a/src/project.hh
++++ b/src/project.hh
+@@ -19,10 +19,17 @@ std::pair<LanguageId, bool> lookupExtension(std::string_view filename);
+ 
+ struct Project {
+   struct Entry {
++    struct Depend {
++      std::string filename;
++      std::vector<const char*> remove_args;
++      std::vector<const char*> add_args;
++    };
+     std::string root;
+     std::string directory;
+     std::string filename;
+     std::vector<const char *> args;
++
++    std::vector<Depend> dependencies;
+     // If true, this entry is inferred and was not read from disk.
+     bool is_inferred = false;
+     // 0 unless coming from a compile_commands.json entry.
