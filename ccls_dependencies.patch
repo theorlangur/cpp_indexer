@@ -1,5 +1,27 @@
+diff --git a/src/indexer.cc b/src/indexer.cc
+index d24e11e..262a8b0 100644
+--- a/src/indexer.cc
++++ b/src/indexer.cc
+@@ -1312,6 +1312,7 @@ index(SemaManager *manager, WorkingFiles *wfiles, VFS *vfs,
+                                             clang->getFileManager(), true));
+ 
+   IndexParam param(*vfs, no_linkage);
++  bool mainIsHeader =lookupExtension(main).second;
+ 
+   index::IndexingOptions indexOpts;
+   indexOpts.SystemSymbolFilter =
+@@ -1374,6 +1375,9 @@ index(SemaManager *manager, WorkingFiles *wfiles, VFS *vfs,
+     if (!it.second.db)
+       continue;
+     std::unique_ptr<IndexFile> &entry = it.second.db;
++    if (mainIsHeader && entry->path != main)
++      continue;
++
+     entry->import_file = main;
+     entry->args = args;
+     for (auto &[_, it] : entry->uid2lid_and_path)
 diff --git a/src/project.cc b/src/project.cc
-index 23fd67e..2819c04 100644
+index d9bbec1..61e1f83 100644
 --- a/src/project.cc
 +++ b/src/project.cc
 @@ -450,6 +450,22 @@ void Project::loadDirectory(const std::string &root, Project::Folder &folder) {
@@ -33,13 +55,14 @@ index 23fd67e..2819c04 100644
  
    Project::Entry ret;
    std::lock_guard lock(mtx);
-@@ -555,20 +572,29 @@ Project::Entry Project::findEntry(const std::string &path, bool can_redirect,
+@@ -555,20 +572,32 @@ Project::Entry Project::findEntry(const std::string &path, bool can_redirect,
        // Infer args from a similar path.
        int best_score = INT_MIN;
        auto [lang, header] = lookupExtension(path);
 +      auto const& lng = lang;
 +      auto const& hdr = header;
 +
++      LOG_S(INFO) << "search best for " << path;
 +      auto checkEntry = [&](Folder &folder, const Entry& e, const std::string &fname, int depIdx = -1){
 +          int score = computeGuessScore(path, fname);
 +          // Decrease score if .c is matched against .hh
@@ -69,11 +92,13 @@ index 23fd67e..2819c04 100644
 -              }
 +              checkEntry(folder, e, e.filename, -1);
 +              for(int i = 0; i < e.dependencies.size(); ++i)
++		{
 +                checkEntry(folder, e, e.dependencies[i].filename, i);
++		}
              }
        ret.is_inferred = true;
      }
-@@ -586,6 +612,42 @@ Project::Entry Project::findEntry(const std::string &path, bool can_redirect,
+@@ -586,6 +615,42 @@ Project::Entry Project::findEntry(const std::string &path, bool can_redirect,
          ret.args.resize(best->compdb_size);
        else
          best_dot_ccls_args = nullptr;
