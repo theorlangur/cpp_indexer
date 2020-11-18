@@ -1,3 +1,15 @@
+diff --git a/clang-tools-extra/clangd/FindSymbols.cpp b/clang-tools-extra/clangd/FindSymbols.cpp
+index d6908f7ab5f..83c52e7477a 100644
+--- a/clang-tools-extra/clangd/FindSymbols.cpp
++++ b/clang-tools-extra/clangd/FindSymbols.cpp
+@@ -160,6 +160,7 @@ getWorkspaceSymbols(llvm::StringRef Query, int Limit,
+ 
+     // Exposed score excludes fuzzy-match component, for client-side re-ranking.
+     Info.score = Score / Relevance.NameMatch;
++    if (Info.score != Info.score) Info.score = 0;
+     Top.push({Score, std::move(Info)});
+   });
+   for (auto &R : std::move(Top).items())
 diff --git a/clang/include/clang/Tooling/CompilationDatabase.h b/clang/include/clang/Tooling/CompilationDatabase.h
 index b28a8a6d6e5..09042ce3715 100644
 --- a/clang/include/clang/Tooling/CompilationDatabase.h
@@ -226,7 +238,7 @@ index fa61560e512..682781c7157 100644
  
    std::vector<std::string> getAllFiles() const override {
 diff --git a/clang/lib/Tooling/JSONCompilationDatabase.cpp b/clang/lib/Tooling/JSONCompilationDatabase.cpp
-index 67a42d3c55a..e2df0a00a11 100644
+index 4aa16853ce4..40f0adc8d25 100644
 --- a/clang/lib/Tooling/JSONCompilationDatabase.cpp
 +++ b/clang/lib/Tooling/JSONCompilationDatabase.cpp
 @@ -236,10 +236,25 @@ JSONCompilationDatabase::getCompileCommands(StringRef FilePath) const {
@@ -255,7 +267,7 @@ index 67a42d3c55a..e2df0a00a11 100644
    return Commands;
  }
  
-@@ -312,6 +327,65 @@ nodeToCommandLine(JSONCommandLineSyntax Syntax,
+@@ -313,6 +328,65 @@ nodeToCommandLine(JSONCommandLineSyntax Syntax,
    return Arguments;
  }
  
@@ -321,7 +333,7 @@ index 67a42d3c55a..e2df0a00a11 100644
  void JSONCompilationDatabase::getCommands(
      ArrayRef<CompileCommandRef> CommandsRef,
      std::vector<CompileCommand> &Commands) const {
-@@ -320,11 +394,16 @@ void JSONCompilationDatabase::getCommands(
+@@ -321,11 +395,16 @@ void JSONCompilationDatabase::getCommands(
      SmallString<32> FilenameStorage;
      SmallString<32> OutputStorage;
      auto Output = std::get<3>(CommandRef);
@@ -339,7 +351,7 @@ index 67a42d3c55a..e2df0a00a11 100644
    }
  }
  
-@@ -354,6 +433,8 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
+@@ -355,6 +434,8 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
      llvm::Optional<std::vector<llvm::yaml::ScalarNode *>> Command;
      llvm::yaml::ScalarNode *File = nullptr;
      llvm::yaml::ScalarNode *Output = nullptr;
@@ -348,7 +360,7 @@ index 67a42d3c55a..e2df0a00a11 100644
      for (auto& NextKeyValue : *Object) {
        auto *KeyString = dyn_cast<llvm::yaml::ScalarNode>(NextKeyValue.getKey());
        if (!KeyString) {
-@@ -383,6 +464,13 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
+@@ -384,6 +465,13 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
            }
            Command->push_back(Scalar);
          }
@@ -362,7 +374,7 @@ index 67a42d3c55a..e2df0a00a11 100644
        } else {
          if (!ValueString) {
            ErrorMessage = "Expected string as value.";
-@@ -418,21 +506,35 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
+@@ -419,21 +507,35 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
      }
      SmallString<8> FileStorage;
      StringRef FileName = File->getValue(FileStorage);
