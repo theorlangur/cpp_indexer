@@ -1,0 +1,12 @@
+diff --git a/clang-tools-extra/clangd/FindSymbols.cpp b/clang-tools-extra/clangd/FindSymbols.cpp
+index d6908f7ab5f..83c52e7477a 100644
+--- a/clang-tools-extra/clangd/FindSymbols.cpp
++++ b/clang-tools-extra/clangd/FindSymbols.cpp
+@@ -160,6 +160,7 @@ getWorkspaceSymbols(llvm::StringRef Query, int Limit,
+ 
+     // Exposed score excludes fuzzy-match component, for client-side re-ranking.
+     Info.score = Score / Relevance.NameMatch;
++    if (Info.score != Info.score) Info.score = 0;
+     Top.push({Score, std::move(Info)});
+   });
+   for (auto &R : std::move(Top).items())

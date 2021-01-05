@@ -29,6 +29,7 @@ git checkout $llvm_commit
 popd
 
 git apply --directory=$llvm_dir compile_db_dependencies.patch
+git apply --directory=$llvm_dir clangd_fix_score.patch
 
 
 cmake -H$llvm_dir/llvm -B$llvm_dir/Release -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_TARGETS_TO_BUILD=X86 -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra"
