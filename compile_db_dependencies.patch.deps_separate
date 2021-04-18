@@ -43,7 +43,7 @@ index 90af15536961..d0c7baacfc2c 100644
      return LHS.Directory == RHS.Directory && LHS.Filename == RHS.Filename &&
             LHS.CommandLine == RHS.CommandLine && LHS.Output == RHS.Output &&
 diff --git a/clang/include/clang/Tooling/JSONCompilationDatabase.h b/clang/include/clang/Tooling/JSONCompilationDatabase.h
-index 96582457c63d..c77a18600223 100644
+index 96582457c63d..1e27a91ef308 100644
 --- a/clang/include/clang/Tooling/JSONCompilationDatabase.h
 +++ b/clang/include/clang/Tooling/JSONCompilationDatabase.h
 @@ -105,6 +105,7 @@ private:
@@ -54,7 +54,7 @@ index 96582457c63d..c77a18600223 100644
    // Tuple (directory, filename, commandline, output) where 'commandline'
    // points to the corresponding scalar nodes in the YAML stream.
    // If the command line contains a single argument, it is a shell-escaped
-@@ -115,11 +116,13 @@ private:
+@@ -115,20 +116,24 @@ private:
    using CompileCommandRef =
        std::tuple<llvm::yaml::ScalarNode *, llvm::yaml::ScalarNode *,
                   std::vector<llvm::yaml::ScalarNode *>,
@@ -69,6 +69,17 @@ index 96582457c63d..c77a18600223 100644
  
    // Maps file paths to the compile command lines for that file.
    llvm::StringMap<std::vector<CompileCommandRef>> IndexByFile;
++  llvm::StringMap<std::vector<CompileCommandRef>> IndexByFileDep;
+ 
+   /// All the compile commands in the order that they were provided in the
+   /// JSON stream.
+   std::vector<CompileCommandRef> AllCommands;
+ 
+   FileMatchTrie MatchTrie;
++  FileMatchTrie MatchTrieDep;
+ 
+   std::unique_ptr<llvm::MemoryBuffer> Database;
+   JSONCommandLineSyntax Syntax;
 diff --git a/clang/lib/Tooling/CompilationDatabase.cpp b/clang/lib/Tooling/CompilationDatabase.cpp
 index 1e19e68633d2..a9c40f1670a9 100644
 --- a/clang/lib/Tooling/CompilationDatabase.cpp
@@ -226,36 +237,71 @@ index 3b65504b98ea..2ab1ee414a70 100644
  
    std::vector<std::string> getAllFiles() const override {
 diff --git a/clang/lib/Tooling/JSONCompilationDatabase.cpp b/clang/lib/Tooling/JSONCompilationDatabase.cpp
-index 97ba7e411fbb..b9e10c2b4f1f 100644
+index 97ba7e411fbb..c5cd59133f7b 100644
 --- a/clang/lib/Tooling/JSONCompilationDatabase.cpp
 +++ b/clang/lib/Tooling/JSONCompilationDatabase.cpp
-@@ -236,10 +236,25 @@ JSONCompilationDatabase::getCompileCommands(StringRef FilePath) const {
-   if (Match.empty())
-     return {};
-   const auto CommandsRefI = IndexByFile.find(Match);
+@@ -230,16 +230,51 @@ JSONCompilationDatabase::getCompileCommands(StringRef FilePath) const {
+   SmallString<128> NativeFilePath;
+   llvm::sys::path::native(FilePath, NativeFilePath);
+ 
+-  std::string Error;
+-  llvm::raw_string_ostream ES(Error);
+-  StringRef Match = MatchTrie.findEquivalent(NativeFilePath, ES);
+-  if (Match.empty())
+-    return {};
+-  const auto CommandsRefI = IndexByFile.find(Match);
+-  if (CommandsRefI == IndexByFile.end())
+-    return {};
++  auto checkIndex = [](FileMatchTrie const& match, llvm::StringMap<std::vector<CompileCommandRef>> const& idx, const SmallString<128>& NativeFilePath)
++  {
++    std::string Error;
++    llvm::raw_string_ostream ES(Error);
++    StringRef Match = match.findEquivalent(NativeFilePath, ES);
++    if (Match.empty())
++      return idx.end();
++    const auto CommandsRefI = idx.find(Match);
 +
-   if (CommandsRefI == IndexByFile.end())
-     return {};
++    if (CommandsRefI == idx.end())
++      return idx.end();
++    return CommandsRefI;
++  };
 +
    std::vector<CompileCommand> Commands;
-   getCommands(CommandsRefI->getValue(), Commands);
-+  for (CompileCommand &cc : Commands) {
-+    StringRef ccfn = cc.Filename;
-+    if (!ccfn.endswith(FilePath)) {
-+      for (size_t i = 0; i < cc.Dependencies.size(); ++i) {
-+        CompileCommand::Dependency const &d = cc.Dependencies[i];
-+        StringRef fn = d.Filename;
-+        if (fn.endswith(FilePath)) {
-+          cc.DependencyIndex = (int)i;
-+          break;
+-  getCommands(CommandsRefI->getValue(), Commands);
++  auto tryGetCommands = [&](decltype(IndexByFile)::const_iterator it)
++  {
++    getCommands(it->getValue(), Commands);
++    for (CompileCommand &cc : Commands) {
++      StringRef ccfn = cc.Filename;
++      if (!ccfn.endswith(FilePath)) {
++        for (size_t i = 0; i < cc.Dependencies.size(); ++i) {
++          CompileCommand::Dependency const &d = cc.Dependencies[i];
++          StringRef fn = d.Filename;
++          if (fn.endswith(FilePath)) {
++            cc.DependencyIndex = (int)i;
++            break;
++          }
 +        }
 +      }
 +    }
++  };
++
++  {
++    const auto mainIdx = checkIndex(MatchTrie, IndexByFile, NativeFilePath);
++    if (mainIdx != IndexByFile.end())
++      tryGetCommands(mainIdx);
++  }
++
++  if (!IndexByFileDep.empty())
++  {
++    const auto depIdx = checkIndex(MatchTrieDep, IndexByFileDep, NativeFilePath);
++    if (depIdx != IndexByFileDep.end())
++      tryGetCommands(depIdx);
 +  }
    return Commands;
  }
  
-@@ -313,6 +328,65 @@ nodeToCommandLine(JSONCommandLineSyntax Syntax,
+@@ -313,6 +348,65 @@ nodeToCommandLine(JSONCommandLineSyntax Syntax,
    return Arguments;
  }
  
@@ -321,7 +367,7 @@ index 97ba7e411fbb..b9e10c2b4f1f 100644
  void JSONCompilationDatabase::getCommands(
      ArrayRef<CompileCommandRef> CommandsRef,
      std::vector<CompileCommand> &Commands) const {
-@@ -321,11 +395,16 @@ void JSONCompilationDatabase::getCommands(
+@@ -321,11 +415,16 @@ void JSONCompilationDatabase::getCommands(
      SmallString<32> FilenameStorage;
      SmallString<32> OutputStorage;
      auto Output = std::get<3>(CommandRef);
@@ -339,7 +385,7 @@ index 97ba7e411fbb..b9e10c2b4f1f 100644
    }
  }
  
-@@ -355,6 +434,8 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
+@@ -355,6 +454,8 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
      llvm::Optional<std::vector<llvm::yaml::ScalarNode *>> Command;
      llvm::yaml::ScalarNode *File = nullptr;
      llvm::yaml::ScalarNode *Output = nullptr;
@@ -348,7 +394,7 @@ index 97ba7e411fbb..b9e10c2b4f1f 100644
      for (auto& NextKeyValue : *Object) {
        auto *KeyString = dyn_cast<llvm::yaml::ScalarNode>(NextKeyValue.getKey());
        if (!KeyString) {
-@@ -384,6 +465,13 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
+@@ -384,6 +485,13 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
            }
            Command->push_back(Scalar);
          }
@@ -362,7 +408,7 @@ index 97ba7e411fbb..b9e10c2b4f1f 100644
        } else {
          if (!ValueString) {
            ErrorMessage = "Expected string as value.";
-@@ -419,21 +507,35 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
+@@ -419,21 +527,35 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
      }
      SmallString<8> FileStorage;
      StringRef FileName = File->getValue(FileStorage);
@@ -403,8 +449,8 @@ index 97ba7e411fbb..b9e10c2b4f1f 100644
 +    {
 +      for (CompileCommand::Dependency const &d : *Dependencies) {
 +        SmallString<128> NativeFilePathDep = FileNameToNative(d.Filename);
-+        IndexByFile[NativeFilePathDep].push_back(Cmd);
-+        MatchTrie.insert(NativeFilePathDep);
++        IndexByFileDep[NativeFilePathDep].push_back(Cmd);
++        MatchTrieDep.insert(NativeFilePathDep);
 +      }
 +    }
 +    AllCommands.push_back(Cmd);

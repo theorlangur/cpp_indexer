@@ -8,7 +8,7 @@ if [ -z "$1" ]; then
 fi
 
 if [ -z "$2" ]; then
-    llvm_commit="master"
+    llvm_commit="main"
 fi
 
 mkdir -p $llvm_dir
@@ -16,7 +16,7 @@ if [ -d "$llvm_dir/.git" ]
 then
     pushd $llvm_dir
     git reset --hard
-    if [[ "$llvm_commit" == "master" ]]; then
+    if [[ "$llvm_commit" == "main" ]]; then
 	git pull --ff-only
     fi
     popd
@@ -29,9 +29,8 @@ git checkout $llvm_commit
 popd
 
 git apply --directory=$llvm_dir compile_db_dependencies.patch
-git apply --directory=$llvm_dir clangd_fix_score.patch
 
 
-cmake -H$llvm_dir/llvm -B$llvm_dir/Release -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_TARGETS_TO_BUILD=X86 -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra"
+cmake -H$llvm_dir/llvm -B$llvm_dir/Release -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_TARGETS_TO_BUILD=X86 -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra" -Wno-dev
 #ninja -C $llvm_dir/Release clangd clangFormat clangFrontendTool clangIndex clangTooling clang
 
