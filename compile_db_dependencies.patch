@@ -1,5 +1,5 @@
 diff --git a/clang/include/clang/Tooling/CompilationDatabase.h b/clang/include/clang/Tooling/CompilationDatabase.h
-index 90af15536961..d0c7baacfc2c 100644
+index 90af15536961..768cc5446b2b 100644
 --- a/clang/include/clang/Tooling/CompilationDatabase.h
 +++ b/clang/include/clang/Tooling/CompilationDatabase.h
 @@ -42,12 +42,29 @@ namespace tooling {
@@ -42,11 +42,29 @@ index 90af15536961..d0c7baacfc2c 100644
    friend bool operator==(const CompileCommand &LHS, const CompileCommand &RHS) {
      return LHS.Directory == RHS.Directory && LHS.Filename == RHS.Filename &&
             LHS.CommandLine == RHS.CommandLine && LHS.Output == RHS.Output &&
+@@ -145,6 +165,9 @@ public:
+   /// By default, this is implemented in terms of getAllFiles() and
+   /// getCompileCommands(). Subclasses may override this for efficiency.
+   virtual std::vector<CompileCommand> getAllCompileCommands() const;
++
++  /// Same as getAllFiles but also potentially with additional info
++  virtual std::vector<std::string> getAllFilesWithDeps() const { return getAllFiles(); }
+ };
+ 
+ /// A compilation database that returns a single compile command line.
 diff --git a/clang/include/clang/Tooling/JSONCompilationDatabase.h b/clang/include/clang/Tooling/JSONCompilationDatabase.h
-index 96582457c63d..c77a18600223 100644
+index 96582457c63d..438788298ba0 100644
 --- a/clang/include/clang/Tooling/JSONCompilationDatabase.h
 +++ b/clang/include/clang/Tooling/JSONCompilationDatabase.h
-@@ -105,6 +105,7 @@ private:
+@@ -92,6 +92,7 @@ public:
+   /// database.
+   std::vector<CompileCommand> getAllCompileCommands() const override;
+ 
++  virtual std::vector<std::string> getAllFilesWithDeps() const override;
+ private:
+   /// Constructs a JSON compilation database on a memory buffer.
+   JSONCompilationDatabase(std::unique_ptr<llvm::MemoryBuffer> Database,
+@@ -105,6 +106,7 @@ private:
    /// failed.
    bool parse(std::string &ErrorMessage);
  
@@ -54,7 +72,7 @@ index 96582457c63d..c77a18600223 100644
    // Tuple (directory, filename, commandline, output) where 'commandline'
    // points to the corresponding scalar nodes in the YAML stream.
    // If the command line contains a single argument, it is a shell-escaped
-@@ -115,11 +116,13 @@ private:
+@@ -115,20 +117,24 @@ private:
    using CompileCommandRef =
        std::tuple<llvm::yaml::ScalarNode *, llvm::yaml::ScalarNode *,
                   std::vector<llvm::yaml::ScalarNode *>,
@@ -69,6 +87,17 @@ index 96582457c63d..c77a18600223 100644
  
    // Maps file paths to the compile command lines for that file.
    llvm::StringMap<std::vector<CompileCommandRef>> IndexByFile;
++  llvm::StringMap<std::vector<CompileCommandRef>> IndexByFileDep;
+ 
+   /// All the compile commands in the order that they were provided in the
+   /// JSON stream.
+   std::vector<CompileCommandRef> AllCommands;
+ 
+   FileMatchTrie MatchTrie;
++  FileMatchTrie MatchTrieDep;
+ 
+   std::unique_ptr<llvm::MemoryBuffer> Database;
+   JSONCommandLineSyntax Syntax;
 diff --git a/clang/lib/Tooling/CompilationDatabase.cpp b/clang/lib/Tooling/CompilationDatabase.cpp
 index 1e19e68633d2..a9c40f1670a9 100644
 --- a/clang/lib/Tooling/CompilationDatabase.cpp
@@ -107,8 +136,23 @@ index 1e19e68633d2..a9c40f1670a9 100644
  CompilationDatabase::~CompilationDatabase() = default;
  
  std::unique_ptr<CompilationDatabase>
+diff --git a/clang/lib/Tooling/ExpandResponseFilesCompilationDatabase.cpp b/clang/lib/Tooling/ExpandResponseFilesCompilationDatabase.cpp
+index f1ab2aed54c0..a5fabc6ab7a1 100644
+--- a/clang/lib/Tooling/ExpandResponseFilesCompilationDatabase.cpp
++++ b/clang/lib/Tooling/ExpandResponseFilesCompilationDatabase.cpp
+@@ -37,6 +37,10 @@ public:
+     return Base->getAllFiles();
+   }
+ 
++  std::vector<std::string> getAllFilesWithDeps() const override {
++    return Base->getAllFilesWithDeps();
++  }
++
+   std::vector<CompileCommand>
+   getCompileCommands(StringRef FilePath) const override {
+     return expand(Base->getCompileCommands(FilePath));
 diff --git a/clang/lib/Tooling/InterpolatingCompilationDatabase.cpp b/clang/lib/Tooling/InterpolatingCompilationDatabase.cpp
-index 3b65504b98ea..2ab1ee414a70 100644
+index 3b65504b98ea..d7148a77440b 100644
 --- a/clang/lib/Tooling/InterpolatingCompilationDatabase.cpp
 +++ b/clang/lib/Tooling/InterpolatingCompilationDatabase.cpp
 @@ -431,38 +431,63 @@ private:
@@ -191,7 +235,14 @@ index 3b65504b98ea..2ab1ee414a70 100644
      return {Best.Index, Best.Points};
    }
  
-@@ -519,7 +544,18 @@ public:
+@@ -513,13 +538,25 @@ private:
+ class InterpolatingCompilationDatabase : public CompilationDatabase {
+ public:
+   InterpolatingCompilationDatabase(std::unique_ptr<CompilationDatabase> Inner)
+-      : Inner(std::move(Inner)), Index(this->Inner->getAllFiles()) {}
++      : Inner(std::move(Inner)), Index(this->Inner->getAllFilesWithDeps()) {}
+ 
+   std::vector<CompileCommand>
    getCompileCommands(StringRef Filename) const override {
      auto Known = Inner->getCompileCommands(Filename);
      if (Index.empty() || !Known.empty())
@@ -203,6 +254,7 @@ index 3b65504b98ea..2ab1ee414a70 100644
 +          CompileCommand trans = TransferableCommand(cc).transferTo(Filename);
 +          trans.ApplyDependency(cc.Dependencies[cc.DependencyIndex]);
 +          cc = trans;
++          llvm::errs() << "Found dependency to apply for " << Filename << ". (Dep: " << cc.Dependencies[cc.DependencyIndex].Filename << ") ";
 +        }
 +      }
        return Known;
@@ -210,7 +262,7 @@ index 3b65504b98ea..2ab1ee414a70 100644
      bool TypeCertain;
      auto Lang = guessType(Filename, &TypeCertain);
      if (!TypeCertain)
-@@ -528,7 +564,13 @@ public:
+@@ -528,13 +565,26 @@ public:
          Inner->getCompileCommands(Index.chooseProxy(Filename, foldType(Lang)));
      if (ProxyCommands.empty())
        return {};
@@ -219,43 +271,121 @@ index 3b65504b98ea..2ab1ee414a70 100644
 +    CompileCommand &proxy = ProxyCommands[0];
 +    CompileCommand trans = TransferableCommand(proxy).transferTo(Filename);
 +    if (proxy.DependencyIndex >= 0)
++    {
 +      trans.ApplyDependency(proxy.Dependencies[proxy.DependencyIndex]);
++      llvm::errs() << "Found dependency to apply for proxy " << Filename << ". (Dep: " << proxy.Dependencies[proxy.DependencyIndex].Filename << ") ";
++    }
 +
 +    return {trans};
    }
  
    std::vector<std::string> getAllFiles() const override {
+     return Inner->getAllFiles();
+   }
+ 
++  std::vector<std::string> getAllFilesWithDeps() const override {
++    return Inner->getAllFilesWithDeps();
++  }
++
+   std::vector<CompileCommand> getAllCompileCommands() const override {
+     return Inner->getAllCompileCommands();
+   }
 diff --git a/clang/lib/Tooling/JSONCompilationDatabase.cpp b/clang/lib/Tooling/JSONCompilationDatabase.cpp
-index 97ba7e411fbb..b9e10c2b4f1f 100644
+index 97ba7e411fbb..14172b8d8903 100644
 --- a/clang/lib/Tooling/JSONCompilationDatabase.cpp
 +++ b/clang/lib/Tooling/JSONCompilationDatabase.cpp
-@@ -236,10 +236,25 @@ JSONCompilationDatabase::getCompileCommands(StringRef FilePath) const {
-   if (Match.empty())
-     return {};
-   const auto CommandsRefI = IndexByFile.find(Match);
-+
-   if (CommandsRefI == IndexByFile.end())
-     return {};
+@@ -28,6 +28,7 @@
+ #include "llvm/Support/Host.h"
+ #include "llvm/Support/MemoryBuffer.h"
+ #include "llvm/Support/Path.h"
++#include "llvm/Support/Signals.h"
+ #include "llvm/Support/StringSaver.h"
+ #include "llvm/Support/VirtualFileSystem.h"
+ #include "llvm/Support/YAMLParser.h"
+@@ -230,24 +231,73 @@ JSONCompilationDatabase::getCompileCommands(StringRef FilePath) const {
+   SmallString<128> NativeFilePath;
+   llvm::sys::path::native(FilePath, NativeFilePath);
+ 
+-  std::string Error;
+-  llvm::raw_string_ostream ES(Error);
+-  StringRef Match = MatchTrie.findEquivalent(NativeFilePath, ES);
+-  if (Match.empty())
+-    return {};
+-  const auto CommandsRefI = IndexByFile.find(Match);
+-  if (CommandsRefI == IndexByFile.end())
+-    return {};
++  auto checkIndex = [](FileMatchTrie const& match, llvm::StringMap<std::vector<CompileCommandRef>> const& idx, const SmallString<128>& NativeFilePath)
++  {
++    std::string Error;
++    llvm::raw_string_ostream ES(Error);
++    StringRef Match = match.findEquivalent(NativeFilePath, ES);
++    if (Match.empty())
++      return idx.end();
++    return idx.find(Match);
++  };
 +
    std::vector<CompileCommand> Commands;
-   getCommands(CommandsRefI->getValue(), Commands);
-+  for (CompileCommand &cc : Commands) {
-+    StringRef ccfn = cc.Filename;
-+    if (!ccfn.endswith(FilePath)) {
-+      for (size_t i = 0; i < cc.Dependencies.size(); ++i) {
-+        CompileCommand::Dependency const &d = cc.Dependencies[i];
-+        StringRef fn = d.Filename;
-+        if (fn.endswith(FilePath)) {
-+          cc.DependencyIndex = (int)i;
-+          break;
+-  getCommands(CommandsRefI->getValue(), Commands);
++  auto tryGetCommands = [&](decltype(IndexByFile)::const_iterator it, bool withDeps)
++  {
++    bool atLeastOneExactMatch = false;
++    getCommands(it->getValue(), Commands);
++    for (CompileCommand &cc : Commands) {
++      StringRef ccfn = cc.Filename;
++      if (ccfn.endswith(FilePath)) 
++        atLeastOneExactMatch = true;
++      else if (withDeps) {
++        for (size_t i = 0; i < cc.Dependencies.size(); ++i) {
++          CompileCommand::Dependency const &d = cc.Dependencies[i];
++          StringRef fn = d.Filename;
++          if (fn.endswith(FilePath)) {
++            cc.DependencyIndex = (int)i;
++            break;
++          }
 +        }
 +      }
 +    }
++    return atLeastOneExactMatch;
++  };
++
++  bool checkDeps = true;
++  {
++    const auto mainIdx = checkIndex(MatchTrie, IndexByFile, NativeFilePath);
++    if (mainIdx != IndexByFile.end())
++      checkDeps = !tryGetCommands(mainIdx, false);
++  }
++
++  if (!IndexByFileDep.empty() && checkDeps)
++  {
++    const auto depIdx = checkIndex(MatchTrieDep, IndexByFileDep, NativeFilePath);
++    if (depIdx != IndexByFileDep.end())
++      tryGetCommands(depIdx, true);
++
 +  }
    return Commands;
  }
  
-@@ -313,6 +328,65 @@ nodeToCommandLine(JSONCommandLineSyntax Syntax,
+ std::vector<std::string>
+ JSONCompilationDatabase::getAllFiles() const {
+   std::vector<std::string> Result;
++  Result.reserve(IndexByFile.size());
++  for (const auto &CommandRef : IndexByFile)
++    Result.push_back(CommandRef.first().str());
++  return Result;
++}
++
++std::vector<std::string> JSONCompilationDatabase::getAllFilesWithDeps() const
++{
++  std::vector<std::string> Result;
++  Result.reserve(IndexByFile.size() + IndexByFileDep.size());
+   for (const auto &CommandRef : IndexByFile)
+     Result.push_back(CommandRef.first().str());
++  for (const auto &CommandRef : IndexByFileDep)
++    Result.push_back(CommandRef.first().str());
+   return Result;
+ }
+ 
+@@ -313,6 +363,65 @@ nodeToCommandLine(JSONCommandLineSyntax Syntax,
    return Arguments;
  }
  
@@ -321,10 +451,12 @@ index 97ba7e411fbb..b9e10c2b4f1f 100644
  void JSONCompilationDatabase::getCommands(
      ArrayRef<CompileCommandRef> CommandsRef,
      std::vector<CompileCommand> &Commands) const {
-@@ -321,11 +395,16 @@ void JSONCompilationDatabase::getCommands(
+@@ -320,12 +429,17 @@ void JSONCompilationDatabase::getCommands(
+     SmallString<8> DirectoryStorage;
      SmallString<32> FilenameStorage;
      SmallString<32> OutputStorage;
-     auto Output = std::get<3>(CommandRef);
+-    auto Output = std::get<3>(CommandRef);
++    auto *Output = std::get<3>(CommandRef);
 +    std::vector<CompileCommand::Dependency> deps;
 +    auto depsShared = std::get<4>(CommandRef);
 +    if (depsShared.get()) deps = *depsShared;
@@ -339,7 +471,7 @@ index 97ba7e411fbb..b9e10c2b4f1f 100644
    }
  }
  
-@@ -355,6 +434,8 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
+@@ -355,6 +469,8 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
      llvm::Optional<std::vector<llvm::yaml::ScalarNode *>> Command;
      llvm::yaml::ScalarNode *File = nullptr;
      llvm::yaml::ScalarNode *Output = nullptr;
@@ -348,7 +480,7 @@ index 97ba7e411fbb..b9e10c2b4f1f 100644
      for (auto& NextKeyValue : *Object) {
        auto *KeyString = dyn_cast<llvm::yaml::ScalarNode>(NextKeyValue.getKey());
        if (!KeyString) {
-@@ -384,6 +465,13 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
+@@ -384,6 +500,14 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
            }
            Command->push_back(Scalar);
          }
@@ -358,11 +490,12 @@ index 97ba7e411fbb..b9e10c2b4f1f 100644
 +          return false;
 +        }
 +        Dependencies.reset(new std::vector<CompileCommand::Dependency>());
-+        ParseCompileCommandDependencies(SequenceString, *Dependencies);
++        if (!ParseCompileCommandDependencies(SequenceString, *Dependencies))
++          ErrorMessage = "Wrong deps";
        } else {
          if (!ValueString) {
            ErrorMessage = "Expected string as value.";
-@@ -419,21 +507,35 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
+@@ -419,21 +543,40 @@ bool JSONCompilationDatabase::parse(std::string &ErrorMessage) {
      }
      SmallString<8> FileStorage;
      StringRef FileName = File->getValue(FileStorage);
@@ -376,8 +509,6 @@ index 97ba7e411fbb..b9e10c2b4f1f 100644
 -      llvm::sys::path::native(AbsolutePath, NativeFilePath);
 -    } else {
 -      llvm::sys::path::native(FileName, NativeFilePath);
--    }
--    auto Cmd = CompileCommandRef(Directory, File, *Command, Output);
 +    auto FileNameToNative = [&Directory](StringRef FileName)->SmallString<128>
 +    {
 +      SmallString<128> NativeFilePath;
@@ -395,6 +526,12 @@ index 97ba7e411fbb..b9e10c2b4f1f 100644
 +    };
 +    SmallString<128> NativeFilePath = FileNameToNative(FileName);
 +
++    if (!ErrorMessage.empty())
++    {
++      llvm::errs() << "Error with deps for file " << NativeFilePath << "\n";
+     }
+-    auto Cmd = CompileCommandRef(Directory, File, *Command, Output);
++
 +    auto Cmd = CompileCommandRef(Directory, File, *Command, Output, Dependencies);
      IndexByFile[NativeFilePath].push_back(Cmd);
 -    AllCommands.push_back(Cmd);
@@ -403,8 +540,8 @@ index 97ba7e411fbb..b9e10c2b4f1f 100644
 +    {
 +      for (CompileCommand::Dependency const &d : *Dependencies) {
 +        SmallString<128> NativeFilePathDep = FileNameToNative(d.Filename);
-+        IndexByFile[NativeFilePathDep].push_back(Cmd);
-+        MatchTrie.insert(NativeFilePathDep);
++        IndexByFileDep[NativeFilePathDep].push_back(Cmd);
++        MatchTrieDep.insert(NativeFilePathDep);
 +      }
 +    }
 +    AllCommands.push_back(Cmd);
