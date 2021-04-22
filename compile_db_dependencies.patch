@@ -152,10 +152,10 @@ index f1ab2aed54c0..a5fabc6ab7a1 100644
    getCompileCommands(StringRef FilePath) const override {
      return expand(Base->getCompileCommands(FilePath));
 diff --git a/clang/lib/Tooling/InterpolatingCompilationDatabase.cpp b/clang/lib/Tooling/InterpolatingCompilationDatabase.cpp
-index 3b65504b98ea..d7148a77440b 100644
+index 3b65504b98ea..50397ae41bdc 100644
 --- a/clang/lib/Tooling/InterpolatingCompilationDatabase.cpp
 +++ b/clang/lib/Tooling/InterpolatingCompilationDatabase.cpp
-@@ -431,38 +431,63 @@ private:
+@@ -431,38 +431,68 @@ private:
        int Points;
        size_t PrefixLength;
      };
@@ -201,14 +201,18 @@ index 3b65504b98ea..d7148a77440b 100644
 +      S.Preferred = PreferredLanguage == types::TY_INVALID ||
 +                    PreferredLanguage == Types[S.Index];
 +      S.Points = Candidate.second;
++      StringRef sExt = llvm::sys::path::extension(OriginalPaths[S.Index]);
 +      if (BetterThan(S, Best))
 +      {
 +        // PrefixLength was only set above if actually needed for a tiebreak.
 +        // But it definitely needs to be set to break ties in the future.
 +        S.PrefixLength = matchingPrefix(Filename, Paths[S.Index].first);
 +        Best = S;
++        if (sExt == extOrig)
++        {
++          BestExt = S;
++        }
 +      }
-+      StringRef sExt = llvm::sys::path::extension(Paths[S.Index].first);
 +      if (sExt == extOrig)
 +      {
 +        if (BetterThan(S, BestExt)) {
@@ -223,6 +227,7 @@ index 3b65504b98ea..d7148a77440b 100644
 -      S.PrefixLength = matchingPrefix(Filename, Paths[S.Index].first);
 -      Best = S;
      }
++
      // Edge case: no candidate got any points.
      // We ignore PreferredLanguage at this point (not ideal).
      if (Best.Index == size_t(-1))
@@ -235,7 +240,7 @@ index 3b65504b98ea..d7148a77440b 100644
      return {Best.Index, Best.Points};
    }
  
-@@ -513,13 +538,25 @@ private:
+@@ -513,13 +543,25 @@ private:
  class InterpolatingCompilationDatabase : public CompilationDatabase {
  public:
    InterpolatingCompilationDatabase(std::unique_ptr<CompilationDatabase> Inner)
@@ -262,7 +267,7 @@ index 3b65504b98ea..d7148a77440b 100644
      bool TypeCertain;
      auto Lang = guessType(Filename, &TypeCertain);
      if (!TypeCertain)
-@@ -528,13 +565,26 @@ public:
+@@ -528,13 +570,26 @@ public:
          Inner->getCompileCommands(Index.chooseProxy(Filename, foldType(Lang)));
      if (ProxyCommands.empty())
        return {};
