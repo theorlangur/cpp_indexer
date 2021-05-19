@@ -28,9 +28,9 @@ pushd $llvm_dir
 git checkout $llvm_commit
 popd
 
-git apply --directory=$llvm_dir compile_db_dependencies.patch
+git apply --directory=$llvm_dir clangd_dependencies_pch.patch
 
 
-cmake -H$llvm_dir/llvm -B$llvm_dir/Release -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_TARGETS_TO_BUILD=X86 -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra" -Wno-dev
+cmake -H$llvm_dir/llvm -B$llvm_dir/build/Release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DLLVM_TARGETS_TO_BUILD=X86 -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra" -Wno-dev
 #ninja -C $llvm_dir/Release clangd clangFormat clangFrontendTool clangIndex clangTooling clang
 
