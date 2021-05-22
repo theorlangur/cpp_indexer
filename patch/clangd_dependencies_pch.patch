@@ -42,7 +42,7 @@ index c25195cd338f..af9a9bf7879d 100644
      } else {
        assert(Stats.Completed == Stats.Enqueued);
 diff --git a/clang-tools-extra/clangd/ClangdServer.cpp b/clang-tools-extra/clangd/ClangdServer.cpp
-index 3f8b95b9104c..8c81781e3e18 100644
+index 3f8b95b9104c..e76361006002 100644
 --- a/clang-tools-extra/clangd/ClangdServer.cpp
 +++ b/clang-tools-extra/clangd/ClangdServer.cpp
 @@ -16,6 +16,7 @@
@@ -61,7 +61,7 @@ index 3f8b95b9104c..8c81781e3e18 100644
  #include "index/CanonicalIncludes.h"
  #include "index/FileIndex.h"
  #include "index/Merge.h"
-@@ -157,12 +159,27 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
+@@ -157,12 +159,28 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
        Transient(Opts.ImplicitCancellation ? TUScheduler::InvalidateOnUpdate
                                            : TUScheduler::NoInvalidation),
        DirtyFS(std::make_unique<DraftStoreFS>(TFS, DraftMgr)) {
@@ -78,6 +78,7 @@ index 3f8b95b9104c..8c81781e3e18 100644
 +      Callbacks->onBackgroundIndexProgress(T);
 +    }
 +  };
++  PCHOpts.WaitForInit = Opts.PCHAlwaysWait;
 +  PrecompiledHeaderMgr = std::make_unique<PCHManager>(CDB, TFS, *ParseCB, PCHOpts);
 +
    // Pass a callback into `WorkScheduler` to extract symbols from a newly
@@ -90,7 +91,7 @@ index 3f8b95b9104c..8c81781e3e18 100644
    // Adds an index to the stack, at higher priority than existing indexes.
    auto AddIndex = [&](SymbolIndex *Idx) {
      if (this->Index != nullptr) {
-@@ -172,6 +189,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
+@@ -172,6 +190,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
        this->Index = Idx;
      }
    };
@@ -98,7 +99,7 @@ index 3f8b95b9104c..8c81781e3e18 100644
    if (Opts.StaticIndex)
      AddIndex(Opts.StaticIndex);
    if (Opts.BackgroundIndex) {
-@@ -186,7 +204,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
+@@ -186,7 +205,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
          TFS, CDB,
          BackgroundIndexStorage::createDiskBackedStorageFactory(
              [&CDB](llvm::StringRef File) { return CDB.getProjectInfo(File); }),
@@ -107,7 +108,7 @@ index 3f8b95b9104c..8c81781e3e18 100644
      AddIndex(BackgroundIdx.get());
    }
    if (DynamicIdx)
-@@ -220,9 +238,16 @@ ClangdServer::~ClangdServer() {
+@@ -220,9 +239,16 @@ ClangdServer::~ClangdServer() {
  void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
                                 llvm::StringRef Version,
                                 WantDiagnostics WantDiags, bool ForceRebuild) {
@@ -124,7 +125,7 @@ index 3f8b95b9104c..8c81781e3e18 100644
    // Compile command is set asynchronously during update, as it can be slow.
    ParseInputs Inputs;
    Inputs.TFS = &TFS;
-@@ -354,7 +379,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
+@@ -354,7 +380,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
        return CB(llvm::make_error<CancelledError>(Reason));
  
      llvm::Optional<SpeculativeFuzzyFind> SpecFuzzyFind;
@@ -133,7 +134,7 @@ index 3f8b95b9104c..8c81781e3e18 100644
        // No speculation in Fallback mode, as it's supposed to be much faster
        // without compiling.
        vlog("Build for file {0} is not ready. Enter fallback mode.", File);
-@@ -373,7 +398,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
+@@ -373,7 +399,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
      // FIXME(ibiryukov): even if Preamble is non-null, we may want to check
      // both the old and the new version in case only one of them matches.
      CodeCompleteResult Result = clangd::codeComplete(
@@ -142,7 +143,7 @@ index 3f8b95b9104c..8c81781e3e18 100644
          SpecFuzzyFind ? SpecFuzzyFind.getPointer() : nullptr);
      {
        clang::clangd::trace::Span Tracer("Completion results callback");
-@@ -408,12 +433,12 @@ void ClangdServer::signatureHelp(PathRef File, Position Pos,
+@@ -408,12 +434,12 @@ void ClangdServer::signatureHelp(PathRef File, Position Pos,
        return CB(IP.takeError());
  
      const auto *PreambleData = IP->Preamble;
@@ -158,7 +159,7 @@ index 3f8b95b9104c..8c81781e3e18 100644
  
    // Unlike code completion, we wait for a preamble here.
 diff --git a/clang-tools-extra/clangd/ClangdServer.h b/clang-tools-extra/clangd/ClangdServer.h
-index 7d98977a7056..063ed05e0ce6 100644
+index 7d98977a7056..de19933707ef 100644
 --- a/clang-tools-extra/clangd/ClangdServer.h
 +++ b/clang-tools-extra/clangd/ClangdServer.h
 @@ -17,6 +17,7 @@
@@ -169,7 +170,17 @@ index 7d98977a7056..063ed05e0ce6 100644
  #include "Protocol.h"
  #include "SemanticHighlighting.h"
  #include "TUScheduler.h"
-@@ -403,6 +404,8 @@ private:
+@@ -166,6 +167,9 @@ public:
+ 
+     FeatureModuleSet *FeatureModules = nullptr;
+ 
++    //defines wether operations on TUs should wait for PCHs manager to be initialized on the start
++    bool PCHAlwaysWait = true;
++
+     explicit operator TUScheduler::Options() const;
+   };
+   // Sensible default options for use in tests.
+@@ -403,6 +407,8 @@ private:
    std::unique_ptr<BackgroundIndex> BackgroundIdx;
    // Storage for merged views of the various indexes.
    std::vector<std::unique_ptr<SymbolIndex>> MergedIdx;
@@ -444,10 +455,10 @@ index b6e2fa3bccdf..54aa309a83a6 100644
  /// Gets compile args from tooling::CompilationDatabases built for parent
 diff --git a/clang-tools-extra/clangd/PCHManager.cpp b/clang-tools-extra/clangd/PCHManager.cpp
 new file mode 100644
-index 000000000000..9018027f764f
+index 000000000000..1bde231ff935
 --- /dev/null
 +++ b/clang-tools-extra/clangd/PCHManager.cpp
-@@ -0,0 +1,679 @@
+@@ -0,0 +1,682 @@
 +#include "PCHManager.h"
 +#include "Preamble.h"
 +#include "TUScheduler.h"
@@ -470,6 +481,7 @@ index 000000000000..9018027f764f
 +#include <memory>
 +#include <mutex>
 +#include <shared_mutex>
++#include <string>
 +#include <utility>
 +
 +namespace clang {
@@ -624,7 +636,8 @@ index 000000000000..9018027f764f
 +      PCHAnnounce(CDB.watch(
 +          [&](const std::vector<tooling::CompileCommand> &PCHAnnounced) {
 +            enqueue(PCHAnnounced);
-+          })) {
++          })),
++      WaitForInit(Opts.WaitForInit) {
 +  ThreadPool.runAsync("pch-worker",
 +                      [this, Ctx(Context::current().clone())]() mutable {
 +                        WithContext BGContext(std::move(Ctx));
@@ -792,6 +805,7 @@ index 000000000000..9018027f764f
 +      CV.wait(Lock, [&] { return InUse == 0; });
 +
 +    ItemState = PCHItem::State::Rebuild;
++    ++Version;
 +    PCHData.clear();
 +    // all dependencies must be invalidated
 +    for (PCHItem *Dep : DependOnMe)
@@ -916,7 +930,7 @@ index 000000000000..9018027f764f
 +      [&](ASTContext &AST, std::shared_ptr<clang::Preprocessor> PP,
 +          const CanonicalIncludes &CanInc) {
 +        // call Callback.onPreambleAST
-+        Callbacks.onPreambleAST(Item.CompileCommand.Filename, "0", AST,
++        Callbacks.onPreambleAST(Item.CompileCommand.Filename, std::to_string(Item.Version), AST,
 +                                std::move(PP), CanInc);
 +      });
 +  PreambleCallbacks &Callbacks = SerializedDeclsCollector;
@@ -1041,7 +1055,7 @@ index 000000000000..9018027f764f
 +
 +PCHManager::PCHAccess
 +PCHManager::tryFindPCH(tooling::CompileCommand const &Cmd) const {
-+  if (!Initialized) {
++  if (!Initialized && !WaitForInit) {
 +    log("(findPCH) is not initialized yet. Return empty for {0}", Cmd.Filename);
 +    return {};
 +  }
@@ -1050,7 +1064,7 @@ index 000000000000..9018027f764f
 +
 +PCHManager::PCHAccess
 +PCHManager::tryFindPCH(clang::clangd::PathRef PCHFile) const {
-+  if (!Initialized) {
++  if (!Initialized && !WaitForInit) {
 +    log("(findPCH) is not initialized yet. Return empty for {0}", PCHFile);
 +    return {};
 +  }
@@ -1130,10 +1144,10 @@ index 000000000000..9018027f764f
 \ No newline at end of file
 diff --git a/clang-tools-extra/clangd/PCHManager.h b/clang-tools-extra/clangd/PCHManager.h
 new file mode 100644
-index 000000000000..b960240c1e27
+index 000000000000..65d6a40bf565
 --- /dev/null
 +++ b/clang-tools-extra/clangd/PCHManager.h
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,198 @@
 +#ifndef LLVM_CLANG_TOOLS_EXTRA_CLANGD_PCHMANAGER_H
 +#define LLVM_CLANG_TOOLS_EXTRA_CLANGD_PCHMANAGER_H
 +
@@ -1222,6 +1236,7 @@ index 000000000000..b960240c1e27
 +  struct Options {
 +    /// Cache (large) pch data in RAM rather than temporary files on disk.
 +    bool StorePCHInMemory = true;
++    bool WaitForInit = true;
 +    std::function<void(Stats)> OnProgress;
 +  };
 +
@@ -1297,6 +1312,7 @@ index 000000000000..b960240c1e27
 +        IncludeStructure Includes;
 +        CanonicalIncludes CanonIncludes;
 +        State ItemState = State::Rebuild;
++        int Version = 0;
 +        mutable std::atomic<unsigned> InUse{0};
 +        mutable std::condition_variable_any CV;
 +    };
@@ -1316,6 +1332,7 @@ index 000000000000..b960240c1e27
 +    GlobalCompilationDatabase::CommandChanged::Subscription CommandsChanged;
 +    GlobalCompilationDatabase::PCHAnnounce::Subscription PCHAnnounce;
 +
++    bool WaitForInit = true;
 +    std::atomic<bool> Initialized = {false};
 +    mutable std::condition_variable_any InitCV;
 +    PCHItemList PCHs;
@@ -1782,6 +1799,33 @@ index 89487bd8607f..0b9ba6622460 100644
      if (!AST) {
        elog("Failed to build AST");
        return false;
+diff --git a/clang-tools-extra/clangd/tool/ClangdMain.cpp b/clang-tools-extra/clangd/tool/ClangdMain.cpp
+index f0aa89b8091f..0c22f855719e 100644
+--- a/clang-tools-extra/clangd/tool/ClangdMain.cpp
++++ b/clang-tools-extra/clangd/tool/ClangdMain.cpp
+@@ -382,6 +382,13 @@ opt<PCHStorageFlag> PCHStorage{
+     init(PCHStorageFlag::Disk),
+ };
+ 
++opt<bool> PCHAlwaysWait{
++    "pch-always-wait",
++    cat(Features),
++    desc("at the start, when processing single file, if there's a PCH specified for it, it will always wait for PCHs to be initialized"),
++    init(true),
++};
++
+ opt<bool> Sync{
+     "sync",
+     cat(Misc),
+@@ -808,6 +815,8 @@ clangd accepts flags on the commandline, and in the CLANGD_FLAGS environment var
+     Opts.StorePreamblesInMemory = false;
+     break;
+   }
++  Opts.PCHAlwaysWait = PCHAlwaysWait;
++
+   if (!ResourceDir.empty())
+     Opts.ResourceDir = ResourceDir;
+   Opts.BuildDynamicSymbolIndex = true;
 diff --git a/clang-tools-extra/clangd/unittests/ClangdLSPServerTests.cpp b/clang-tools-extra/clangd/unittests/ClangdLSPServerTests.cpp
 index 6955fa0caa25..760bfd508911 100644
 --- a/clang-tools-extra/clangd/unittests/ClangdLSPServerTests.cpp
