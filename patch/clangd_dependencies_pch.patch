@@ -25,9 +25,18 @@ index 671e55e8622d..645cb59910a2 100644
    ParsedAST.cpp
    Preamble.cpp
 diff --git a/clang-tools-extra/clangd/ClangdLSPServer.cpp b/clang-tools-extra/clangd/ClangdLSPServer.cpp
-index c25195cd338f..af9a9bf7879d 100644
+index c25195cd338f..272add9e2fcd 100644
 --- a/clang-tools-extra/clangd/ClangdLSPServer.cpp
 +++ b/clang-tools-extra/clangd/ClangdLSPServer.cpp
+@@ -681,7 +681,7 @@ void ClangdLSPServer::onDocumentDidChange(
+     }
+   }
+   Server->addDocument(File, NewCode, encodeVersion(Params.textDocument.version),
+-                      WantDiags, Params.forceRebuild);
++                      WantDiags, Params.forceRebuild, true);
+ }
+ 
+ void ClangdLSPServer::onDocumentDidSave(
 @@ -1608,9 +1608,10 @@ void ClangdLSPServer::onBackgroundIndexProgress(
        WorkDoneProgressReport Report;
        Report.percentage = 100 * (Stats.Completed - Stats.LastIdle) /
@@ -42,7 +51,7 @@ index c25195cd338f..af9a9bf7879d 100644
      } else {
        assert(Stats.Completed == Stats.Enqueued);
 diff --git a/clang-tools-extra/clangd/ClangdServer.cpp b/clang-tools-extra/clangd/ClangdServer.cpp
-index 3f8b95b9104c..e76361006002 100644
+index 3f8b95b9104c..4f91999d2375 100644
 --- a/clang-tools-extra/clangd/ClangdServer.cpp
 +++ b/clang-tools-extra/clangd/ClangdServer.cpp
 @@ -16,6 +16,7 @@
@@ -108,15 +117,17 @@ index 3f8b95b9104c..e76361006002 100644
      AddIndex(BackgroundIdx.get());
    }
    if (DynamicIdx)
-@@ -220,9 +239,16 @@ ClangdServer::~ClangdServer() {
+@@ -219,10 +238,17 @@ ClangdServer::~ClangdServer() {
+ 
  void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
                                 llvm::StringRef Version,
-                                WantDiagnostics WantDiags, bool ForceRebuild) {
+-                               WantDiagnostics WantDiags, bool ForceRebuild) {
++                               WantDiagnostics WantDiags, bool ForceRebuild, bool AfterChange) {
 +  bool Existed = DraftMgr.getDraft(File).hasValue();
    std::string ActualVersion = DraftMgr.addDraft(File, Version, Contents);
    ParseOptions Opts;
  
-+  if (Existed)
++  if (Existed && AfterChange)
 +  {
 +    //slow. needs to be done in bulk
 +    PrecompiledHeaderMgr->checkChangedFile(File, DraftMgr.asVFS());
@@ -159,7 +170,7 @@ index 3f8b95b9104c..e76361006002 100644
  
    // Unlike code completion, we wait for a preamble here.
 diff --git a/clang-tools-extra/clangd/ClangdServer.h b/clang-tools-extra/clangd/ClangdServer.h
-index 7d98977a7056..de19933707ef 100644
+index 7d98977a7056..3bb3436a0e35 100644
 --- a/clang-tools-extra/clangd/ClangdServer.h
 +++ b/clang-tools-extra/clangd/ClangdServer.h
 @@ -17,6 +17,7 @@
@@ -180,6 +191,15 @@ index 7d98977a7056..de19933707ef 100644
      explicit operator TUScheduler::Options() const;
    };
    // Sensible default options for use in tests.
+@@ -201,7 +205,7 @@ public:
+   void addDocument(PathRef File, StringRef Contents,
+                    llvm::StringRef Version = "null",
+                    WantDiagnostics WD = WantDiagnostics::Auto,
+-                   bool ForceRebuild = false);
++                   bool ForceRebuild = false, bool AfterChange = false);
+ 
+   /// Remove \p File from list of tracked files, schedule a request to free
+   /// resources associated with it. Pending diagnostics for closed files may not
 @@ -403,6 +407,8 @@ private:
    std::unique_ptr<BackgroundIndex> BackgroundIdx;
    // Storage for merged views of the various indexes.
@@ -190,7 +210,7 @@ index 7d98977a7056..de19933707ef 100644
    // When set, provides clang-tidy options for a specific file.
    TidyProviderRef ClangTidyProvider;
 diff --git a/clang-tools-extra/clangd/CodeComplete.cpp b/clang-tools-extra/clangd/CodeComplete.cpp
-index 19f33a40f889..6ae5f3789e51 100644
+index 19f33a40f889..1a30497a15ec 100644
 --- a/clang-tools-extra/clangd/CodeComplete.cpp
 +++ b/clang-tools-extra/clangd/CodeComplete.cpp
 @@ -1092,7 +1092,8 @@ private:
@@ -203,7 +223,15 @@ index 19f33a40f889..6ae5f3789e51 100644
    const llvm::Optional<PreamblePatch> Patch;
    const ParseInputs &ParseInput;
  };
-@@ -1160,23 +1161,29 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
+@@ -1148,6 +1149,7 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
+   std::tie(FrontendOpts.CodeCompletionAt.Line,
+            FrontendOpts.CodeCompletionAt.Column) =
+       offsetToClangLineColumn(Input.ParseInput.Contents, Input.Offset);
++  log("Sema complete at {0}:{1}", FrontendOpts.CodeCompletionAt.Line, FrontendOpts.CodeCompletionAt.Column);
+ 
+   std::unique_ptr<llvm::MemoryBuffer> ContentsBuffer =
+       llvm::MemoryBuffer::getMemBuffer(Input.ParseInput.Contents,
+@@ -1160,23 +1162,29 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
    // However, if we're completing *inside* the preamble section of the draft,
    // overriding the preamble will break sema completion. Fortunately we can just
    // skip all includes in this case; these completions are really simple.
@@ -241,7 +269,7 @@ index 19f33a40f889..6ae5f3789e51 100644
    Clang->setCodeCompletionConsumer(Consumer.release());
  
    SyntaxOnlyAction Action;
-@@ -1191,7 +1198,8 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
+@@ -1191,7 +1199,8 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
    //  - but Sema code complete won't see them: as part of the preamble, they're
    //    deserialized only when mentioned.
    // Force them to be deserialized so SemaCodeComplete sees them.
@@ -251,7 +279,7 @@ index 19f33a40f889..6ae5f3789e51 100644
    if (Includes)
      Clang->getPreprocessor().addPPCallbacks(
          collectIncludeStructureCallback(Clang->getSourceManager(), Includes));
-@@ -1851,6 +1859,7 @@ CompletionPrefix guessCompletionPrefix(llvm::StringRef Content,
+@@ -1851,6 +1860,7 @@ CompletionPrefix guessCompletionPrefix(llvm::StringRef Content,
  CodeCompleteResult codeComplete(PathRef FileName, Position Pos,
                                  const PreambleData *Preamble,
                                  const ParseInputs &ParseInput,
@@ -259,7 +287,7 @@ index 19f33a40f889..6ae5f3789e51 100644
                                  CodeCompleteOptions Opts,
                                  SpeculativeFuzzyFind *SpecFuzzyFind) {
    auto Offset = positionToOffset(ParseInput.Contents, Pos);
-@@ -1861,18 +1870,19 @@ CodeCompleteResult codeComplete(PathRef FileName, Position Pos,
+@@ -1861,18 +1871,19 @@ CodeCompleteResult codeComplete(PathRef FileName, Position Pos,
    auto Flow = CodeCompleteFlow(
        FileName, Preamble ? Preamble->Includes : IncludeStructure(),
        SpecFuzzyFind, Opts);
@@ -283,7 +311,7 @@ index 19f33a40f889..6ae5f3789e51 100644
    auto Offset = positionToOffset(ParseInput.Contents, Pos);
    if (!Offset) {
      elog("Signature help position was invalid {0}", Offset.takeError());
-@@ -1884,12 +1894,13 @@ SignatureHelp signatureHelp(PathRef FileName, Position Pos,
+@@ -1884,12 +1895,13 @@ SignatureHelp signatureHelp(PathRef FileName, Position Pos,
    Options.IncludeMacros = false;
    Options.IncludeCodePatterns = false;
    Options.IncludeBriefComments = false;
@@ -455,10 +483,10 @@ index b6e2fa3bccdf..54aa309a83a6 100644
  /// Gets compile args from tooling::CompilationDatabases built for parent
 diff --git a/clang-tools-extra/clangd/PCHManager.cpp b/clang-tools-extra/clangd/PCHManager.cpp
 new file mode 100644
-index 000000000000..1bde231ff935
+index 000000000000..34fd346fd884
 --- /dev/null
 +++ b/clang-tools-extra/clangd/PCHManager.cpp
-@@ -0,0 +1,682 @@
+@@ -0,0 +1,746 @@
 +#include "PCHManager.h"
 +#include "Preamble.h"
 +#include "TUScheduler.h"
@@ -641,7 +669,7 @@ index 000000000000..1bde231ff935
 +  ThreadPool.runAsync("pch-worker",
 +                      [this, Ctx(Context::current().clone())]() mutable {
 +                        WithContext BGContext(std::move(Ctx));
-+                        Queue.work({});
++                        Queue.work([&]{Queue.push(checkChangedPeriodically());});
 +                      });
 +}
 +
@@ -660,19 +688,59 @@ index 000000000000..1bde231ff935
 +  return T;
 +}
 +
++PCHQueue::Task PCHManager::checkChangedPeriodically()
++{
++  PCHQueue::Task T([this] {
++    using namespace std::chrono_literals;
++    std::this_thread::sleep_for(500ms);
++    if (!Changed.empty())
++    {
++      std::unique_lock<std::mutex> Lock(ChangedMtx);
++      auto Dms = std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now() - ChangedLastTime).count();
++      if (Dms > 2000)
++      {
++        log("(PCH) sending changed file for processing ({0} items)", Changed.size());
++        enqueue(Changed, ChangedFS);
++        Changed.clear();
++        ChangedFS = nullptr;
++        return;
++      }
++    }
++
++    Queue.push(checkChangedPeriodically());
++  });
++  return T;
++}
++
 +void PCHManager::checkChangedFile(PathRef File, FSType FS) {
 +  if (!Initialized)
-+    return;
++  {
++      log("(PCH) check changed file: not initialized yet");
++      return;
++  }
 +
 +  {
 +    shared_lck SharedAccessToAllHeaders(UsedHeadersLock);
 +    if (!AllUsedHeaders.contains(File))
-+      return;
++    {
++      std::string LowerCase(File);
++      if (LowerCase[0] != std::tolower(LowerCase[0]))
++        LowerCase[0] = std::tolower(LowerCase[0]);
++      else
++        LowerCase[0] = std::toupper(LowerCase[0]);
++      if (!AllUsedHeaders.contains(LowerCase)) {
++        log("(PCH) file {0}/{1} doesn't affect any PCHs", File, LowerCase);
++        return;
++      }
++    }
 +  }
 +
-+  std::vector<std::string> Changed;
-+  Changed.emplace_back(File);
-+  enqueue(Changed, FS);
++  {
++    std::unique_lock<std::mutex> Lock(ChangedMtx);
++    ChangedLastTime = clock_t::now();
++    Changed.emplace_back(File);
++    ChangedFS = FS;
++  }
 +}
 +
 +void PCHManager::updateAllHeaders() {
@@ -818,15 +886,21 @@ index 000000000000..1bde231ff935
 +    const std::vector<std::string> &ChangedFiles) {
 +  uniq_lck ExclusiveAccessToPCH(PCHLock);
 +  unsigned Invalidated = 0;
-+  llvm::StringSet<> Changed;
-+  for (const auto &S : ChangedFiles)
-+    Changed.insert(S);
++  llvm::StringSet<> ChangedU;
++  llvm::StringSet<> ChangedL;
++  for (auto S : ChangedFiles)
++  {
++    S[0] = std::toupper(S[0]);
++    ChangedU.insert(S);
++    S[0] = std::tolower(S[0]);
++    ChangedL.insert(S);
++  }
 +  for (auto &UI : PCHs) {
 +    PCHItem &Item = *UI;
 +    if (Item.ItemState == PCHItem::State::Rebuild)
 +      continue;
 +
-+    if (Changed.find(Item.CompileCommand.Filename) != Changed.end()) {
++    if (ChangedU.contains(Item.CompileCommand.Filename) || ChangedL.contains(Item.CompileCommand.Filename)) {
 +      log("(PCH) invalidating {0} and all dependendents",
 +          Item.CompileCommand.Filename);
 +      Invalidated += Item.invalidate(ExclusiveAccessToPCH);
@@ -834,7 +908,7 @@ index 000000000000..1bde231ff935
 +    }
 +
 +    for (const auto &S : Item.Includes.allHeaders()) {
-+      if (Changed.find(S) != Changed.end()) {
++      if (ChangedU.contains(S) || ChangedL.contains(S)) {
 +        log("(PCH) invalidating {0} and all dependendents because"
 +            " of the included (possible indirectly) {1} has changed",
 +            Item.CompileCommand.Filename, S);
@@ -867,11 +941,21 @@ index 000000000000..1bde231ff935
 +void PCHManager::rebuildPCH(PCHItem &Item, FSType FS) {
 +  auto S = PCHItem::State::Invalid;
 +  auto OnExit = llvm::make_scope_exit([&] {
++    if (OnProgress)
++      OnProgress(Stats{++Complete, Total});
 +    Item.ItemState = S;
 +    Item.CV.notify_all();
 +  });
 +
 +  PCHItem *Dep = Item.IdependOn.empty() ? nullptr : Item.IdependOn[0];
++  if (Dep && Dep->ItemState == PCHItem::State::Rebuild) {
++    elog("(PCH)Cannot rebuild PCH for {0} as it depends on {1} which is "
++         "in rebuild state",
++         Item.CompileCommand.Filename, Dep->CompileCommand.Filename);
++    
++    shared_lck Lock(PCHLock);
++    Dep->CV.wait(Lock, [&] { return Dep->ItemState != PCHItem::State::Rebuild; });
++  }
 +  if (Dep && Dep->ItemState != PCHItem::State::Valid) {
 +    elog("(PCH)Cannot rebuild PCH for {0} as it depends on {1} which is "
 +         "invalid",
@@ -1041,16 +1125,24 @@ index 000000000000..1bde231ff935
 +}
 +
 +void PCHManager::rebuildInvalidatedPCH(unsigned Total, FSType FS) {
-+  unsigned Complete = 0;
-+  if (OnProgress)
-+    OnProgress(Stats{Complete, Total});
++  Complete = 0;
++  this->Total = Total;
++  if (OnProgress) OnProgress(Stats{Complete, Total});
++  std::vector<std::thread> Builders;
++  Builders.reserve(PCHs.size());
 +  for (auto &I : PCHs) {
 +    if (I->ItemState == PCHItem::State::Rebuild) {
-+      rebuildPCH(*I, FS);
-+      if (OnProgress)
-+        OnProgress(Stats{++Complete, Total});
++      //rebuildPCH(*I, FS);
++      Builders.emplace_back(
++          [this,It=&*I,FS]() {
++            rebuildPCH(*It, FS);
++          }
++      );
 +    }
 +  }
++
++  for(auto &T : Builders)
++    T.join();
 +}
 +
 +PCHManager::PCHAccess
@@ -1144,10 +1236,10 @@ index 000000000000..1bde231ff935
 \ No newline at end of file
 diff --git a/clang-tools-extra/clangd/PCHManager.h b/clang-tools-extra/clangd/PCHManager.h
 new file mode 100644
-index 000000000000..65d6a40bf565
+index 000000000000..d42ef44cede0
 --- /dev/null
 +++ b/clang-tools-extra/clangd/PCHManager.h
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,211 @@
 +#ifndef LLVM_CLANG_TOOLS_EXTRA_CLANGD_PCHMANAGER_H
 +#define LLVM_CLANG_TOOLS_EXTRA_CLANGD_PCHMANAGER_H
 +
@@ -1288,6 +1380,9 @@ index 000000000000..65d6a40bf565
 +    }
 +
 +    PCHQueue::Task
++    checkChangedPeriodically();
++
++    PCHQueue::Task
 +    changedFilesTask(const std::vector<std::string> &ChangedFiles, FSType FS);
 +
 +    PCHQueue::Task
@@ -1339,8 +1434,18 @@ index 000000000000..65d6a40bf565
 +    mutable std::shared_timed_mutex PCHLock;
 +    AsyncTaskRunner ThreadPool;
 +
++    using clock_t = std::chrono::steady_clock;
++    using time_point_t = std::chrono::time_point<clock_t>;
++    std::mutex ChangedMtx;
++    std::vector<std::string> Changed;
++    FSType ChangedFS;
++    time_point_t ChangedLastTime;
++
 +    llvm::StringSet<> AllUsedHeaders;
 +    mutable std::shared_timed_mutex UsedHeadersLock;
++
++    unsigned Total=0;
++    std::atomic<unsigned> Complete{0};
 +};
 +} // namespace clangd
 +} // namespace clang
@@ -2099,10 +2204,10 @@ index b0c0d1b7c2a1..24d810dc89b6 100644
      ADD_FAILURE() << "Failed to build code:\n" << Code;
      llvm_unreachable("Failed to build TestTU!");
 diff --git a/clang/include/clang/Tooling/CompilationDatabase.h b/clang/include/clang/Tooling/CompilationDatabase.h
-index 90af15536961..6025bfa20ba0 100644
+index 90af15536961..a6d903ab6dae 100644
 --- a/clang/include/clang/Tooling/CompilationDatabase.h
 +++ b/clang/include/clang/Tooling/CompilationDatabase.h
-@@ -42,12 +42,29 @@ namespace tooling {
+@@ -42,12 +42,30 @@ namespace tooling {
  
  /// Specifies the working directory and command of a compilation.
  struct CompileCommand {
@@ -2127,12 +2232,13 @@ index 90af15536961..6025bfa20ba0 100644
 +                 std::vector<Dependency> Dependencies)
 +      : CompileCommand(Directory, Filename, std::move(CommandLine), Output) { this->Dependencies = std::move(Dependencies); }
 +
++  void RemoveDepArgs(const Dependency &d);
 +  void ApplyDependency(const Dependency &d);
 +
    /// The working directory the command was executed from.
    std::string Directory;
  
-@@ -65,6 +82,9 @@ struct CompileCommand {
+@@ -65,6 +83,9 @@ struct CompileCommand {
    /// e.g. "inferred from foo/bar.h".
    std::string Heuristic;
  
@@ -2142,7 +2248,7 @@ index 90af15536961..6025bfa20ba0 100644
    friend bool operator==(const CompileCommand &LHS, const CompileCommand &RHS) {
      return LHS.Directory == RHS.Directory && LHS.Filename == RHS.Filename &&
             LHS.CommandLine == RHS.CommandLine && LHS.Output == RHS.Output &&
-@@ -145,6 +165,14 @@ public:
+@@ -145,6 +166,14 @@ public:
    /// By default, this is implemented in terms of getAllFiles() and
    /// getCompileCommands(). Subclasses may override this for efficiency.
    virtual std::vector<CompileCommand> getAllCompileCommands() const;
@@ -2217,14 +2323,14 @@ index 96582457c63d..4a11bbf288d7 100644
    std::unique_ptr<llvm::MemoryBuffer> Database;
    JSONCommandLineSyntax Syntax;
 diff --git a/clang/lib/Tooling/CompilationDatabase.cpp b/clang/lib/Tooling/CompilationDatabase.cpp
-index 1e19e68633d2..e8a2a4d2aa6c 100644
+index 1e19e68633d2..e9522d717adb 100644
 --- a/clang/lib/Tooling/CompilationDatabase.cpp
 +++ b/clang/lib/Tooling/CompilationDatabase.cpp
-@@ -58,6 +58,33 @@ using namespace tooling;
+@@ -58,6 +58,37 @@ using namespace tooling;
  
  LLVM_INSTANTIATE_REGISTRY(CompilationDatabasePluginRegistry)
  
-+void CompileCommand::ApplyDependency(const Dependency &d)
++void CompileCommand::RemoveDepArgs(const Dependency &d)
 +{
 +  for (const std::string &arg : d.RemoveArgs) {
 +    const char *pArg = arg.c_str();
@@ -2246,6 +2352,10 @@ index 1e19e68633d2..e8a2a4d2aa6c 100644
 +      CommandLine.erase(it, it + skip + 1);
 +    }
 +  }
++}
++void CompileCommand::ApplyDependency(const Dependency &d)
++{
++  RemoveDepArgs(d);
 +  if (!d.AddArgs.empty())
 +    CommandLine.insert(CommandLine.end(), d.AddArgs.begin(),
 +                           d.AddArgs.end());
@@ -2254,7 +2364,7 @@ index 1e19e68633d2..e8a2a4d2aa6c 100644
  CompilationDatabase::~CompilationDatabase() = default;
  
  std::unique_ptr<CompilationDatabase>
-@@ -138,6 +165,15 @@ std::vector<CompileCommand> CompilationDatabase::getAllCompileCommands() const {
+@@ -138,6 +169,15 @@ std::vector<CompileCommand> CompilationDatabase::getAllCompileCommands() const {
    return Result;
  }
  

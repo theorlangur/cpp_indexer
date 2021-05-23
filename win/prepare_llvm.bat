@@ -20,7 +20,7 @@ pushd %llvm_dir%
 git checkout %llvm_commit%
 popd
 
-git apply --directory=%llvm_dir% clangd_dependencies_pch.patch
+git apply --directory=%llvm_dir% patch\clangd_dependencies_pch.patch
 
 
 cmake -H%llvm_dir%\llvm -B%llvm_dir%\build\Release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DLLVM_TARGETS_TO_BUILD=X86 -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra"
