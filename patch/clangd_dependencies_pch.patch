@@ -210,7 +210,7 @@ index 7d98977a7056..3bb3436a0e35 100644
    // When set, provides clang-tidy options for a specific file.
    TidyProviderRef ClangTidyProvider;
 diff --git a/clang-tools-extra/clangd/CodeComplete.cpp b/clang-tools-extra/clangd/CodeComplete.cpp
-index 19f33a40f889..abd029ae0a8d 100644
+index 19f33a40f889..eb13319fc95b 100644
 --- a/clang-tools-extra/clangd/CodeComplete.cpp
 +++ b/clang-tools-extra/clangd/CodeComplete.cpp
 @@ -1092,7 +1092,8 @@ private:
@@ -223,7 +223,14 @@ index 19f33a40f889..abd029ae0a8d 100644
    const llvm::Optional<PreamblePatch> Patch;
    const ParseInputs &ParseInput;
  };
-@@ -1148,6 +1149,7 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
+@@ -1142,12 +1143,14 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
+   // This is on-by-default in windows to allow parsing SDK headers; we're only
+   // disabling it for the main-file (not preamble).
+   CI->getLangOpts()->DelayedTemplateParsing = false;
++  CI->getPreprocessorOpts().addMacroDef("_CLANGD_CODE_COMPLETE_");
+   // Setup code completion.
+   FrontendOpts.CodeCompleteOpts = Options;
+   FrontendOpts.CodeCompletionAt.FileName = std::string(Input.FileName);
    std::tie(FrontendOpts.CodeCompletionAt.Line,
             FrontendOpts.CodeCompletionAt.Column) =
        offsetToClangLineColumn(Input.ParseInput.Contents, Input.Offset);
@@ -231,7 +238,7 @@ index 19f33a40f889..abd029ae0a8d 100644
  
    std::unique_ptr<llvm::MemoryBuffer> ContentsBuffer =
        llvm::MemoryBuffer::getMemBuffer(Input.ParseInput.Contents,
-@@ -1160,23 +1162,54 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
+@@ -1160,23 +1163,54 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
    // However, if we're completing *inside* the preamble section of the draft,
    // overriding the preamble will break sema completion. Fortunately we can just
    // skip all includes in this case; these completions are really simple.
@@ -294,7 +301,7 @@ index 19f33a40f889..abd029ae0a8d 100644
    Clang->setCodeCompletionConsumer(Consumer.release());
  
    SyntaxOnlyAction Action;
-@@ -1191,7 +1224,8 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
+@@ -1191,7 +1225,8 @@ bool semaCodeComplete(std::unique_ptr<CodeCompleteConsumer> Consumer,
    //  - but Sema code complete won't see them: as part of the preamble, they're
    //    deserialized only when mentioned.
    // Force them to be deserialized so SemaCodeComplete sees them.
@@ -304,7 +311,7 @@ index 19f33a40f889..abd029ae0a8d 100644
    if (Includes)
      Clang->getPreprocessor().addPPCallbacks(
          collectIncludeStructureCallback(Clang->getSourceManager(), Includes));
-@@ -1778,7 +1812,6 @@ private:
+@@ -1778,7 +1813,6 @@ private:
      dlog("CodeComplete: {0} ({1}) = {2}\n{3}{4}\n", First.Name,
           llvm::to_string(Origin), Scores.Total, llvm::to_string(Quality),
           llvm::to_string(Relevance));
@@ -312,7 +319,7 @@ index 19f33a40f889..abd029ae0a8d 100644
      NSema += bool(Origin & SymbolOrigin::AST);
      NIndex += FromIndex;
      NSemaAndIndex += bool(Origin & SymbolOrigin::AST) && FromIndex;
-@@ -1851,6 +1884,7 @@ CompletionPrefix guessCompletionPrefix(llvm::StringRef Content,
+@@ -1851,6 +1885,7 @@ CompletionPrefix guessCompletionPrefix(llvm::StringRef Content,
  CodeCompleteResult codeComplete(PathRef FileName, Position Pos,
                                  const PreambleData *Preamble,
                                  const ParseInputs &ParseInput,
@@ -320,7 +327,7 @@ index 19f33a40f889..abd029ae0a8d 100644
                                  CodeCompleteOptions Opts,
                                  SpeculativeFuzzyFind *SpecFuzzyFind) {
    auto Offset = positionToOffset(ParseInput.Contents, Pos);
-@@ -1861,18 +1895,19 @@ CodeCompleteResult codeComplete(PathRef FileName, Position Pos,
+@@ -1861,18 +1896,19 @@ CodeCompleteResult codeComplete(PathRef FileName, Position Pos,
    auto Flow = CodeCompleteFlow(
        FileName, Preamble ? Preamble->Includes : IncludeStructure(),
        SpecFuzzyFind, Opts);
@@ -344,11 +351,11 @@ index 19f33a40f889..abd029ae0a8d 100644
    auto Offset = positionToOffset(ParseInput.Contents, Pos);
    if (!Offset) {
      elog("Signature help position was invalid {0}", Offset.takeError());
-@@ -1884,12 +1919,13 @@ SignatureHelp signatureHelp(PathRef FileName, Position Pos,
+@@ -1884,12 +1920,13 @@ SignatureHelp signatureHelp(PathRef FileName, Position Pos,
    Options.IncludeMacros = false;
    Options.IncludeCodePatterns = false;
    Options.IncludeBriefComments = false;
-+  llvm::Optional<PreamblePatch> Patch = /*PCH ? llvm::None :*/ llvm::Optional<PreamblePatch>(PreamblePatch::create(FileName, ParseInput, *Preamble));
++  llvm::Optional<PreamblePatch> Patch = Preamble ? llvm::None : llvm::Optional<PreamblePatch>(PreamblePatch::create(FileName, ParseInput, *Preamble));
    semaCodeComplete(
        std::make_unique<SignatureHelpCollector>(Options, ParseInput.Index,
                                                 Result),
@@ -361,7 +368,7 @@ index 19f33a40f889..abd029ae0a8d 100644
  }
  
 diff --git a/clang-tools-extra/clangd/CodeComplete.h b/clang-tools-extra/clangd/CodeComplete.h
-index 40a528caa939..808cad09302b 100644
+index 40a528caa939..733a33edd876 100644
 --- a/clang-tools-extra/clangd/CodeComplete.h
 +++ b/clang-tools-extra/clangd/CodeComplete.h
 @@ -18,6 +18,7 @@
@@ -372,18 +379,7 @@ index 40a528caa939..808cad09302b 100644
  #include "Protocol.h"
  #include "Quality.h"
  #include "index/Index.h"
-@@ -263,6 +264,10 @@ struct SpeculativeFuzzyFind {
-   /// The result is consumed by `codeComplete()` if speculation succeeded.
-   /// NOTE: the destructor will wait for the async call to finish.
-   std::future<SymbolSlab> Result;
-+
-+  void test()
-+  {
-+  }
- };
- 
- /// Gets code completions at a specified \p Pos in \p FileName.
-@@ -278,13 +283,15 @@ struct SpeculativeFuzzyFind {
+@@ -278,13 +279,15 @@ struct SpeculativeFuzzyFind {
  CodeCompleteResult codeComplete(PathRef FileName, Position Pos,
                                  const PreambleData *Preamble,
                                  const ParseInputs &ParseInput,
@@ -527,7 +523,7 @@ index b6e2fa3bccdf..54aa309a83a6 100644
  /// Gets compile args from tooling::CompilationDatabases built for parent
 diff --git a/clang-tools-extra/clangd/PCHManager.cpp b/clang-tools-extra/clangd/PCHManager.cpp
 new file mode 100644
-index 000000000000..9e5472204775
+index 000000000000..e1bb1363b2ed
 --- /dev/null
 +++ b/clang-tools-extra/clangd/PCHManager.cpp
 @@ -0,0 +1,754 @@
@@ -1213,7 +1209,7 @@ index 000000000000..9e5472204775
 +PCHManager::PCHAccess
 +PCHManager::findPCH(tooling::CompileCommand const &Cmd) const {
 +  // return {};
-+  /*if (llvm::StringRef(Cmd.Filename).endswith(".h"))
++  /* if (llvm::StringRef(Cmd.Filename).endswith(".h"))
 +  {
 +    log("(findPCH) turned off for headers. {0}", Cmd.Filename);
 +    return {};
@@ -1698,7 +1694,7 @@ index 5b9d17840214..8b86d7c1e778 100644
  /// Returns true if \p Preamble is reusable for \p Inputs. Note that it will
  /// return true when some missing headers are now available.
 diff --git a/clang-tools-extra/clangd/TUScheduler.cpp b/clang-tools-extra/clangd/TUScheduler.cpp
-index 435deb6ec162..672c38eaf859 100644
+index 435deb6ec162..4560075cd0a6 100644
 --- a/clang-tools-extra/clangd/TUScheduler.cpp
 +++ b/clang-tools-extra/clangd/TUScheduler.cpp
 @@ -50,6 +50,7 @@
@@ -1762,12 +1758,11 @@ index 435deb6ec162..672c38eaf859 100644
        Barrier(Barrier), Done(false), Status(FileName, Callbacks),
        PreamblePeer(FileName, Callbacks, Opts.StorePreamblesInMemory, RunSync,
                     Status, HeaderIncluders, *this) {
-@@ -812,6 +815,21 @@ void ASTWorker::update(ParseInputs Inputs, WantDiagnostics WantDiags,
+@@ -812,6 +815,19 @@ void ASTWorker::update(ParseInputs Inputs, WantDiagnostics WantDiags,
        vlog("Driver produced command: cc1 {0}", printArgv(CC1Args));
      std::vector<Diag> CompilerInvocationDiags =
          CompilerInvocationDiagConsumer.take();
 +    
-+      /*
 +    PCHManager::PCHAccess PCH = PCHMgr ? PCHMgr->tryFindPCH(Inputs.CompileCommand) : PCHManager::PCHAccess{};
 +    if (PCH)
 +    {
@@ -1779,12 +1774,11 @@ index 435deb6ec162..672c38eaf859 100644
 +      generateDiagnostics(std::move(Invocation), std::move(Inputs), std::move(CompilerInvocationDiags));
 +      return;
 +    }
-+      */
 +
      if (!Invocation) {
        elog("Could not build CompilerInvocation for file {0}", FileName);
        // Remove the old AST if it's still in cache.
-@@ -878,9 +896,10 @@ void ASTWorker::runWithAST(
+@@ -878,9 +894,10 @@ void ASTWorker::runWithAST(
        // return a compatible preamble as ASTWorker::update blocks.
        llvm::Optional<ParsedAST> NewAST;
        if (Invocation) {
@@ -1796,7 +1790,7 @@ index 435deb6ec162..672c38eaf859 100644
          ++ASTBuildCount;
        }
        AST = NewAST ? std::make_unique<ParsedAST>(std::move(*NewAST)) : nullptr;
-@@ -931,7 +950,7 @@ void PreambleThread::build(Request Req) {
+@@ -931,7 +948,7 @@ void PreambleThread::build(Request Req) {
                                        const CanonicalIncludes &CanonIncludes) {
          Callbacks.onPreambleAST(FileName, Version, Ctx, std::move(PP),
                                  CanonIncludes);
@@ -1805,7 +1799,7 @@ index 435deb6ec162..672c38eaf859 100644
    if (LatestBuild && isReliable(LatestBuild->CompileCommand))
      HeaderIncluders.update(FileName, LatestBuild->Includes.allHeaders());
  }
-@@ -1038,9 +1057,10 @@ void ASTWorker::generateDiagnostics(
+@@ -1038,9 +1055,10 @@ void ASTWorker::generateDiagnostics(
    llvm::Optional<std::unique_ptr<ParsedAST>> AST =
        IdleASTs.take(this, &ASTAccessForDiag);
    if (!AST || !InputsAreLatest) {
@@ -1817,7 +1811,7 @@ index 435deb6ec162..672c38eaf859 100644
      auto RebuildDuration = DebouncePolicy::clock::now() - RebuildStartTime;
      ++ASTBuildCount;
      // Try to record the AST-build time, to inform future update debouncing.
-@@ -1445,8 +1465,8 @@ struct TUScheduler::FileData {
+@@ -1445,8 +1463,8 @@ struct TUScheduler::FileData {
  
  TUScheduler::TUScheduler(const GlobalCompilationDatabase &CDB,
                           const Options &Opts,
@@ -1828,7 +1822,7 @@ index 435deb6ec162..672c38eaf859 100644
        Callbacks(Callbacks ? move(Callbacks)
                            : std::make_unique<ParsingCallbacks>()),
        Barrier(Opts.AsyncThreadsCount), QuickRunBarrier(Opts.AsyncThreadsCount),
-@@ -1496,7 +1516,7 @@ bool TUScheduler::update(PathRef File, ParseInputs Inputs,
+@@ -1496,7 +1514,7 @@ bool TUScheduler::update(PathRef File, ParseInputs Inputs,
      ASTWorkerHandle Worker =
          ASTWorker::create(File, CDB, *IdleASTs, *HeaderIncluders,
                            WorkerThreads ? WorkerThreads.getPointer() : nullptr,
@@ -1837,7 +1831,7 @@ index 435deb6ec162..672c38eaf859 100644
      FD = std::unique_ptr<FileData>(
          new FileData{Inputs.Contents, std::move(Worker)});
      ContentChanged = true;
-@@ -1579,10 +1599,11 @@ void TUScheduler::runWithPreamble(llvm::StringRef Name, PathRef File,
+@@ -1579,10 +1597,11 @@ void TUScheduler::runWithPreamble(llvm::StringRef Name, PathRef File,
      std::shared_ptr<const ASTSignals> Signals;
      std::shared_ptr<const PreambleData> Preamble =
          It->second->Worker->getPossiblyStalePreamble(&Signals);
@@ -1850,7 +1844,7 @@ index 435deb6ec162..672c38eaf859 100644
      return;
    }
  
-@@ -1594,7 +1615,8 @@ void TUScheduler::runWithPreamble(llvm::StringRef Name, PathRef File,
+@@ -1594,7 +1613,8 @@ void TUScheduler::runWithPreamble(llvm::StringRef Name, PathRef File,
                                                 std::string(File)),
                 Action = std::move(Action), this]() mutable {
      std::shared_ptr<const PreambleData> Preamble;
@@ -1860,7 +1854,7 @@ index 435deb6ec162..672c38eaf859 100644
        // Wait until the preamble is built for the first time, if preamble
        // is required. This avoids extra work of processing the preamble
        // headers in parallel multiple times.
-@@ -1608,7 +1630,7 @@ void TUScheduler::runWithPreamble(llvm::StringRef Name, PathRef File,
+@@ -1608,7 +1628,7 @@ void TUScheduler::runWithPreamble(llvm::StringRef Name, PathRef File,
      trace::Span Tracer(Name);
      SPAN_ATTACH(Tracer, "file", File);
      WithContext WithProvidedContext(Opts.ContextProvider(File));
@@ -2045,7 +2039,7 @@ index f0aa89b8091f..0c22f855719e 100644
      Opts.ResourceDir = ResourceDir;
    Opts.BuildDynamicSymbolIndex = true;
 diff --git a/clang-tools-extra/clangd/unittests/ClangdLSPServerTests.cpp b/clang-tools-extra/clangd/unittests/ClangdLSPServerTests.cpp
-index 6955fa0caa25..760bfd508911 100644
+index 6955fa0caa25..be88fc119e88 100644
 --- a/clang-tools-extra/clangd/unittests/ClangdLSPServerTests.cpp
 +++ b/clang-tools-extra/clangd/unittests/ClangdLSPServerTests.cpp
 @@ -15,11 +15,13 @@
@@ -2062,17 +2056,19 @@ index 6955fa0caa25..760bfd508911 100644
  
  namespace clang {
  namespace clangd {
-@@ -43,6 +45,9 @@ protected:
+@@ -43,6 +45,11 @@ protected:
      // This is needed to we can test index-based operations like call hierarchy.
      Base.BuildDynamicSymbolIndex = true;
      Base.FeatureModules = &FeatureModules;
-+    Base.WorkspaceRoot = "/home/orlangur/myapps/cpp/dummy/";
-+    Base.ResourceDir = "/home/orlangur/myapps/cpp/cpp_indexer/build/llvm/Debug/lib/clang/13.0.0";
-+    //Base.BackgroundIndex = true;
++    //Base.WorkspaceRoot = "/home/orlangur/myapps/cpp/dummy/";
++    //Base.ResourceDir = "/home/orlangur/myapps/cpp/cpp_indexer/build/llvm/Debug/lib/clang/13.0.0";
++    Base.WorkspaceRoot = "d:\\Develoing\\grandma_main\\gma3";
++    Base.ResourceDir = "d:\\Develoing\\cppindex\\cpp_indexer\\build\\llvm\\build\\MSVC\\Debug\\lib\\clang\\13.0.0";
++    Base.BackgroundIndex = false;
    }
  
    LSPClient &start() {
-@@ -68,7 +73,8 @@ protected:
+@@ -68,7 +75,8 @@ protected:
        stop();
    }
  
@@ -2082,7 +2078,7 @@ index 6955fa0caa25..760bfd508911 100644
    ClangdLSPServer::Options Opts;
    FeatureModuleSet FeatureModules;
  
-@@ -137,6 +143,7 @@ TEST_F(LSPTest, Diagnostics) {
+@@ -137,6 +145,7 @@ TEST_F(LSPTest, Diagnostics) {
    EXPECT_THAT(Client.diagnostics("foo.cpp"), llvm::ValueIs(testing::IsEmpty()));
  }
  
@@ -2090,7 +2086,7 @@ index 6955fa0caa25..760bfd508911 100644
  TEST_F(LSPTest, DiagnosticsHeaderSaved) {
    auto &Client = start();
    Client.didOpen("foo.cpp", R"cpp(
-@@ -165,6 +172,7 @@ TEST_F(LSPTest, DiagnosticsHeaderSaved) {
+@@ -165,6 +174,7 @@ TEST_F(LSPTest, DiagnosticsHeaderSaved) {
                llvm::ValueIs(testing::ElementsAre(
                    DiagMessage("Use of undeclared identifier 'changed'"))));
  }
@@ -2098,7 +2094,7 @@ index 6955fa0caa25..760bfd508911 100644
  
  TEST_F(LSPTest, RecordsLatencies) {
    trace::TestTracer Tracer;
-@@ -176,6 +184,7 @@ TEST_F(LSPTest, RecordsLatencies) {
+@@ -176,6 +186,7 @@ TEST_F(LSPTest, RecordsLatencies) {
    EXPECT_THAT(Tracer.takeMetric("lsp_latency", MethodName), testing::SizeIs(1));
  }
  
@@ -2106,7 +2102,7 @@ index 6955fa0caa25..760bfd508911 100644
  TEST_F(LSPTest, IncomingCalls) {
    Annotations Code(R"cpp(
      void calle^e(int);
-@@ -268,6 +277,7 @@ capture(llvm::Optional<llvm::Expected<T>> &Out) {
+@@ -268,6 +279,7 @@ capture(llvm::Optional<llvm::Expected<T>> &Out) {
    Out.reset();
    return [&Out](llvm::Expected<T> V) { Out.emplace(std::move(V)); };
  }
@@ -2114,7 +2110,7 @@ index 6955fa0caa25..760bfd508911 100644
  
  TEST_F(LSPTest, FeatureModulesThreadingTest) {
    // A feature module that does its work on a background thread, and so
-@@ -386,6 +396,68 @@ TEST_F(LSPTest, DiagModuleTest) {
+@@ -386,6 +398,72 @@ TEST_F(LSPTest, DiagModuleTest) {
    EXPECT_THAT(Client.diagnostics("foo.cpp"),
                llvm::ValueIs(testing::ElementsAre(DiagMessage(DiagMsg))));
  }
@@ -2122,9 +2118,10 @@ index 6955fa0caa25..760bfd508911 100644
 +TEST_F(LSPTest, PCHTest) {
 +  auto &Client = start();
 +  using namespace std::chrono_literals;
-+  int fd;
-+  const char *pPath = "/home/orlangur/myapps/cpp/dummy/source/db/db2.h";
-+  llvm::sys::fs::openFileForRead(pPath, fd);
++  llvm::sys::fs::file_t fd;
++  //const char *pPath = "/home/orlangur/myapps/cpp/dummy/source/db/db2.h";
++  const char *pPath = "d:\\Developing\\grandma_main\\gma3\\source\\lib_db\\db_drives.h";
++  fd = *llvm::sys::fs::openNativeFileForRead(pPath);
 +  uint64_t sz;
 +  llvm::sys::fs::file_size(pPath, sz);
 +  std::vector<char> content;
@@ -2133,7 +2130,7 @@ index 6955fa0caa25..760bfd508911 100644
 +  content[sz] = 0;
 +  llvm::sys::fs::closeFile(fd);
 +  Client.didOpen(pPath, content.data());
-+  std::this_thread::sleep_for(15s);
++  std::this_thread::sleep_for(155s);
 +  //for(int i = 0; i < 5; ++i)
 +  {
 +    Client.notify(
@@ -2144,14 +2141,16 @@ index 6955fa0caa25..760bfd508911 100644
 +                 pPath, 36)},
 +            {"contentChanges", {llvm::json::Object{
 +              {"range", llvm::json::Object{
-+                {"start", Position{16, 7}},
-+                {"end", Position{16, 7}}
++                //{"start", Position{16, 7}},
++                //{"end", Position{16, 7}}
++                {"start", Position{76, 16}},
++                {"end", Position{76, 16}}
 +              }},
 +              {"rangeLength", 0},
-+              {"text", "x"},
++              {"text", "v"},
 +            }}},
 +        });
-+    std::this_thread::sleep_for(80ms);
++    std::this_thread::sleep_for(8s);
 +  }
 +  {
 +    auto &Def = Client.call(
@@ -2161,9 +2160,10 @@ index 6955fa0caa25..760bfd508911 100644
 +             Client.documentID(
 +                 pPath)},
 +            {"context", llvm::json::Object{{"triggerKind", 1}}},
-+            {"position", Position{16, 8}},
++            //{"position", Position{16, 8}},
++            {"position", Position{76, 17}},
 +        });
-+    std::this_thread::sleep_for(1s);
++    std::this_thread::sleep_for(3s);
 +  }
 +                          /*
 +  auto &Def = Client.call("textDocument/hover",
