@@ -523,10 +523,10 @@ index b6e2fa3bccdf..54aa309a83a6 100644
  /// Gets compile args from tooling::CompilationDatabases built for parent
 diff --git a/clang-tools-extra/clangd/PCHManager.cpp b/clang-tools-extra/clangd/PCHManager.cpp
 new file mode 100644
-index 000000000000..e1bb1363b2ed
+index 000000000000..10d5aeba3cf1
 --- /dev/null
 +++ b/clang-tools-extra/clangd/PCHManager.cpp
-@@ -0,0 +1,754 @@
+@@ -0,0 +1,756 @@
 +#include "PCHManager.h"
 +#include "Preamble.h"
 +#include "TUScheduler.h"
@@ -1156,15 +1156,15 @@ index 000000000000..e1bb1363b2ed
 +  Act->EndSourceFile();
 +
 +  if (!Act->hasEmittedPreamblePCH()) {
-+    elog("(PCH)Could not emmit PCH for {0}", Item.CompileCommand.Filename);
++    elog("(PCH)Could not emmit PCH for {0} (Version: {1})", Item.CompileCommand.Filename, Item.Version);
 +    return;
 +  }
 +
 +  Item.Includes = SerializedDeclsCollector.takeIncludes();
 +  Item.CanonIncludes = SerializedDeclsCollector.takeCanonicalIncludes();
 +  S = PCHItem::State::Valid;
-+  log("(PCH)Successfully generated precompiled header of size: {0} (file: {1})",
-+      Item.PCHData.size(), Item.CompileCommand.Filename);
++  log("(PCH)Successfully generated precompiled header of size: {0} (file: {1}; Version: {2})",
++      Item.PCHData.size(), Item.CompileCommand.Filename, Item.Version);
 +}
 +
 +void PCHManager::rebuildInvalidatedPCH(unsigned Total, FSType FS) {
@@ -1251,9 +1251,11 @@ index 000000000000..e1bb1363b2ed
 +    CompilerInvocation *CI,
 +    IntrusiveRefCntPtr<llvm::vfs::FileSystem> &VFS) const {
 +  if (Item) {
-+    CI->getPreprocessorOpts().DisablePCHOrModuleValidation =
++    auto &pp = CI->getPreprocessorOpts();
++    pp.AllowPCHWithCompilerErrors = true;
++    pp.DisablePCHOrModuleValidation =
 +        DisableValidationForModuleKind::PCH;
-+    CI->getPreprocessorOpts().ImplicitPCHInclude =
++    pp.ImplicitPCHInclude =
 +        std::string(Item->CompileCommand.Filename) + ".pch";
 +    VFS = addDependencies(Item, VFS);
 +    return true;
@@ -1284,10 +1286,10 @@ index 000000000000..e1bb1363b2ed
 \ No newline at end of file
 diff --git a/clang-tools-extra/clangd/PCHManager.h b/clang-tools-extra/clangd/PCHManager.h
 new file mode 100644
-index 000000000000..d42ef44cede0
+index 000000000000..2193baa12933
 --- /dev/null
 +++ b/clang-tools-extra/clangd/PCHManager.h
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,212 @@
 +#ifndef LLVM_CLANG_TOOLS_EXTRA_CLANGD_PCHMANAGER_H
 +#define LLVM_CLANG_TOOLS_EXTRA_CLANGD_PCHMANAGER_H
 +
@@ -1399,6 +1401,7 @@ index 000000000000..d42ef44cede0
 +
 +    bool addPCH(CompilerInvocation *CI, IntrusiveRefCntPtr<llvm::vfs::FileSystem> &VFS) const;
 +    llvm::StringRef filename() const {return Item->CompileCommand.Filename;}
++    auto version() const { return Item->Version; }
 +
 +    operator bool() const { return Item != nullptr; }
 +  private:
@@ -1600,7 +1603,7 @@ index 000000000000..0aa53208b541
 +} // namespace clangd
 +} // namespace clang
 diff --git a/clang-tools-extra/clangd/ParsedAST.cpp b/clang-tools-extra/clangd/ParsedAST.cpp
-index 0d7e4631d660..337919b62b81 100644
+index 0d7e4631d660..249c84c351ef 100644
 --- a/clang-tools-extra/clangd/ParsedAST.cpp
 +++ b/clang-tools-extra/clangd/ParsedAST.cpp
 @@ -245,11 +245,18 @@ llvm::Optional<ParsedAST>
@@ -1616,7 +1619,7 @@ index 0d7e4631d660..337919b62b81 100644
 +  if (PCHAccess && *PCHAccess) 
 +  {
 +    Preamble = nullptr;
-+    log("building AST for {0} and applying PCH {1}", Inputs.CompileCommand.Filename, PCHAccess->filename());
++    log("building AST for {0} and applying PCH {1} (Version {2})", Inputs.CompileCommand.Filename, PCHAccess->filename(), PCHAccess->version());
 +    PCHAccess->addPCH(CI.get(), VFS);
 +  }
 +
@@ -1694,7 +1697,7 @@ index 5b9d17840214..8b86d7c1e778 100644
  /// Returns true if \p Preamble is reusable for \p Inputs. Note that it will
  /// return true when some missing headers are now available.
 diff --git a/clang-tools-extra/clangd/TUScheduler.cpp b/clang-tools-extra/clangd/TUScheduler.cpp
-index 435deb6ec162..4560075cd0a6 100644
+index 435deb6ec162..582c42f28631 100644
 --- a/clang-tools-extra/clangd/TUScheduler.cpp
 +++ b/clang-tools-extra/clangd/TUScheduler.cpp
 @@ -50,6 +50,7 @@
@@ -1766,7 +1769,7 @@ index 435deb6ec162..4560075cd0a6 100644
 +    PCHManager::PCHAccess PCH = PCHMgr ? PCHMgr->tryFindPCH(Inputs.CompileCommand) : PCHManager::PCHAccess{};
 +    if (PCH)
 +    {
-+      log("ASTWorker: discovered PCH for {0}. Skipping preamble build", FileName);
++      log("ASTWorker: discovered PCH for {0}. (Version: {1}) Skipping preamble build", FileName, PCH.version());
 +      IdleASTs.take(this);
 +      RanASTCallback = false;
 +      LatestPreamble.emplace();
