@@ -210,7 +210,7 @@ index 7d98977a7056..3bb3436a0e35 100644
    // When set, provides clang-tidy options for a specific file.
    TidyProviderRef ClangTidyProvider;
 diff --git a/clang-tools-extra/clangd/CodeComplete.cpp b/clang-tools-extra/clangd/CodeComplete.cpp
-index 19f33a40f889..eb13319fc95b 100644
+index 19f33a40f889..7963aceecdcf 100644
 --- a/clang-tools-extra/clangd/CodeComplete.cpp
 +++ b/clang-tools-extra/clangd/CodeComplete.cpp
 @@ -1092,7 +1092,8 @@ private:
@@ -355,7 +355,7 @@ index 19f33a40f889..eb13319fc95b 100644
    Options.IncludeMacros = false;
    Options.IncludeCodePatterns = false;
    Options.IncludeBriefComments = false;
-+  llvm::Optional<PreamblePatch> Patch = Preamble ? llvm::None : llvm::Optional<PreamblePatch>(PreamblePatch::create(FileName, ParseInput, *Preamble));
++  llvm::Optional<PreamblePatch> Patch = !Preamble ? llvm::None : llvm::Optional<PreamblePatch>(PreamblePatch::create(FileName, ParseInput, *Preamble));
    semaCodeComplete(
        std::make_unique<SignatureHelpCollector>(Options, ParseInput.Index,
                                                 Result),
