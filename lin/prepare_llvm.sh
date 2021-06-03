@@ -26,6 +26,7 @@ fi
 
 pushd $llvm_dir
 git checkout $llvm_commit
+git clean -f
 popd
 
 git apply --directory=$llvm_dir clangd_dependencies_pch.patch

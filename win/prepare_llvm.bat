@@ -18,6 +18,7 @@ IF EXIST %llvm_dir%\^.git (
 
 pushd %llvm_dir%
 git checkout %llvm_commit%
+git clean -f
 popd
 
 git apply --directory=%llvm_dir% patch\clangd_dependencies_pch.patch
