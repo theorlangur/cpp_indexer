@@ -25,7 +25,7 @@ index 671e55e8622d..645cb59910a2 100644
    ParsedAST.cpp
    Preamble.cpp
 diff --git a/clang-tools-extra/clangd/ClangdLSPServer.cpp b/clang-tools-extra/clangd/ClangdLSPServer.cpp
-index c25195cd338f..272add9e2fcd 100644
+index f70fd0018cfd..b158f0923da3 100644
 --- a/clang-tools-extra/clangd/ClangdLSPServer.cpp
 +++ b/clang-tools-extra/clangd/ClangdLSPServer.cpp
 @@ -681,7 +681,7 @@ void ClangdLSPServer::onDocumentDidChange(
@@ -37,7 +37,7 @@ index c25195cd338f..272add9e2fcd 100644
  }
  
  void ClangdLSPServer::onDocumentDidSave(
-@@ -1608,9 +1608,10 @@ void ClangdLSPServer::onBackgroundIndexProgress(
+@@ -1605,9 +1605,10 @@ void ClangdLSPServer::onBackgroundIndexProgress(
        WorkDoneProgressReport Report;
        Report.percentage = 100 * (Stats.Completed - Stats.LastIdle) /
                            (Stats.Enqueued - Stats.LastIdle);
@@ -51,7 +51,7 @@ index c25195cd338f..272add9e2fcd 100644
      } else {
        assert(Stats.Completed == Stats.Enqueued);
 diff --git a/clang-tools-extra/clangd/ClangdServer.cpp b/clang-tools-extra/clangd/ClangdServer.cpp
-index 3f8b95b9104c..4f91999d2375 100644
+index 0f525f3b9a0a..6bb575ed6ea9 100644
 --- a/clang-tools-extra/clangd/ClangdServer.cpp
 +++ b/clang-tools-extra/clangd/ClangdServer.cpp
 @@ -16,6 +16,7 @@
@@ -70,7 +70,7 @@ index 3f8b95b9104c..4f91999d2375 100644
  #include "index/CanonicalIncludes.h"
  #include "index/FileIndex.h"
  #include "index/Merge.h"
-@@ -157,12 +159,28 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
+@@ -160,12 +162,28 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
        Transient(Opts.ImplicitCancellation ? TUScheduler::InvalidateOnUpdate
                                            : TUScheduler::NoInvalidation),
        DirtyFS(std::make_unique<DraftStoreFS>(TFS, DraftMgr)) {
@@ -100,7 +100,7 @@ index 3f8b95b9104c..4f91999d2375 100644
    // Adds an index to the stack, at higher priority than existing indexes.
    auto AddIndex = [&](SymbolIndex *Idx) {
      if (this->Index != nullptr) {
-@@ -172,6 +190,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
+@@ -175,6 +193,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
        this->Index = Idx;
      }
    };
@@ -108,7 +108,7 @@ index 3f8b95b9104c..4f91999d2375 100644
    if (Opts.StaticIndex)
      AddIndex(Opts.StaticIndex);
    if (Opts.BackgroundIndex) {
-@@ -186,7 +205,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
+@@ -189,7 +208,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
          TFS, CDB,
          BackgroundIndexStorage::createDiskBackedStorageFactory(
              [&CDB](llvm::StringRef File) { return CDB.getProjectInfo(File); }),
@@ -117,7 +117,7 @@ index 3f8b95b9104c..4f91999d2375 100644
      AddIndex(BackgroundIdx.get());
    }
    if (DynamicIdx)
-@@ -219,10 +238,17 @@ ClangdServer::~ClangdServer() {
+@@ -222,10 +241,19 @@ ClangdServer::~ClangdServer() {
  
  void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
                                 llvm::StringRef Version,
@@ -127,16 +127,26 @@ index 3f8b95b9104c..4f91999d2375 100644
    std::string ActualVersion = DraftMgr.addDraft(File, Version, Contents);
    ParseOptions Opts;
  
++  auto draftVFS = DraftMgr.asVFS();
++
 +  if (Existed && AfterChange)
 +  {
 +    //slow. needs to be done in bulk
-+    PrecompiledHeaderMgr->checkChangedFile(File, DraftMgr.asVFS());
++    PrecompiledHeaderMgr->checkChangedFile(File, draftVFS);
 +  }
 +
    // Compile command is set asynchronously during update, as it can be slow.
    ParseInputs Inputs;
    Inputs.TFS = &TFS;
-@@ -354,7 +380,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
+@@ -236,6 +264,7 @@ void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
+   Inputs.Index = Index;
+   Inputs.ClangTidyProvider = ClangTidyProvider;
+   Inputs.FeatureModules = FeatureModules;
++  Inputs.DraftFS = draftVFS;
+   bool NewFile = WorkScheduler->update(File, Inputs, WantDiags);
+   // If we loaded Foo.h, we want to make sure Foo.cpp is indexed.
+   if (NewFile && BackgroundIdx)
+@@ -357,7 +386,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
        return CB(llvm::make_error<CancelledError>(Reason));
  
      llvm::Optional<SpeculativeFuzzyFind> SpecFuzzyFind;
@@ -145,7 +155,7 @@ index 3f8b95b9104c..4f91999d2375 100644
        // No speculation in Fallback mode, as it's supposed to be much faster
        // without compiling.
        vlog("Build for file {0} is not ready. Enter fallback mode.", File);
-@@ -373,7 +399,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
+@@ -376,7 +405,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
      // FIXME(ibiryukov): even if Preamble is non-null, we may want to check
      // both the old and the new version in case only one of them matches.
      CodeCompleteResult Result = clangd::codeComplete(
@@ -154,7 +164,7 @@ index 3f8b95b9104c..4f91999d2375 100644
          SpecFuzzyFind ? SpecFuzzyFind.getPointer() : nullptr);
      {
        clang::clangd::trace::Span Tracer("Completion results callback");
-@@ -408,12 +434,12 @@ void ClangdServer::signatureHelp(PathRef File, Position Pos,
+@@ -411,12 +440,12 @@ void ClangdServer::signatureHelp(PathRef File, Position Pos,
        return CB(IP.takeError());
  
      const auto *PreambleData = IP->Preamble;
@@ -398,7 +408,7 @@ index 40a528caa939..733a33edd876 100644
  // For index-based completion, we only consider:
  //   * symbols in namespaces or translation unit scopes (e.g. no class
 diff --git a/clang-tools-extra/clangd/CodeCompletionStrings.cpp b/clang-tools-extra/clangd/CodeCompletionStrings.cpp
-index d4a3bdafcae0..f41cc7423bff 100644
+index 8205c88a5b66..7e226df726e2 100644
 --- a/clang-tools-extra/clangd/CodeCompletionStrings.cpp
 +++ b/clang-tools-extra/clangd/CodeCompletionStrings.cpp
 @@ -84,7 +84,9 @@ std::string getDeclComment(const ASTContext &Ctx, const NamedDecl &Decl) {
@@ -412,6 +422,19 @@ index d4a3bdafcae0..f41cc7423bff 100644
    std::string Doc =
        RC->getFormattedText(Ctx.getSourceManager(), Ctx.getDiagnostics());
    if (!looksLikeDocComment(Doc))
+diff --git a/clang-tools-extra/clangd/Compiler.h b/clang-tools-extra/clangd/Compiler.h
+index 035106968315..fe117fdb4e22 100644
+--- a/clang-tools-extra/clangd/Compiler.h
++++ b/clang-tools-extra/clangd/Compiler.h
+@@ -59,6 +59,8 @@ struct ParseInputs {
+   TidyProviderRef ClangTidyProvider = {};
+   // Used to acquire ASTListeners when parsing files.
+   FeatureModuleSet *FeatureModules = nullptr;
++
++  IntrusiveRefCntPtr<llvm::vfs::FileSystem> DraftFS;
+ };
+ 
+ /// Builds compiler invocation that could be used to build AST or preamble.
 diff --git a/clang-tools-extra/clangd/GlobalCompilationDatabase.cpp b/clang-tools-extra/clangd/GlobalCompilationDatabase.cpp
 index d830190bfdfd..50f13575c611 100644
 --- a/clang-tools-extra/clangd/GlobalCompilationDatabase.cpp
@@ -523,10 +546,10 @@ index b6e2fa3bccdf..54aa309a83a6 100644
  /// Gets compile args from tooling::CompilationDatabases built for parent
 diff --git a/clang-tools-extra/clangd/PCHManager.cpp b/clang-tools-extra/clangd/PCHManager.cpp
 new file mode 100644
-index 000000000000..10d5aeba3cf1
+index 000000000000..990513ec9760
 --- /dev/null
 +++ b/clang-tools-extra/clangd/PCHManager.cpp
-@@ -0,0 +1,756 @@
+@@ -0,0 +1,757 @@
 +#include "PCHManager.h"
 +#include "Preamble.h"
 +#include "TUScheduler.h"
@@ -1040,9 +1063,10 @@ index 000000000000..10d5aeba3cf1
 +
 +  auto VFS = TFS.view(Item.CompileCommand.Directory);
 +  if (FS) {
++    log("(PCH) using passed FS as overlay");
 +    IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
-+        new llvm::vfs::OverlayFileSystem(FS)); // passed FS is primary
-+    Overlay->pushOverlay(VFS);                 // VFS is secondary
++        new llvm::vfs::OverlayFileSystem(VFS)); // passed VFS is primary
++    Overlay->pushOverlay(FS);                 // FS is secondary
 +    VFS = Overlay;
 +  }
 +  if (Dep) {
@@ -1603,10 +1627,10 @@ index 000000000000..0aa53208b541
 +} // namespace clangd
 +} // namespace clang
 diff --git a/clang-tools-extra/clangd/ParsedAST.cpp b/clang-tools-extra/clangd/ParsedAST.cpp
-index 0d7e4631d660..249c84c351ef 100644
+index 0d7e4631d660..9f07da45ad24 100644
 --- a/clang-tools-extra/clangd/ParsedAST.cpp
 +++ b/clang-tools-extra/clangd/ParsedAST.cpp
-@@ -245,11 +245,18 @@ llvm::Optional<ParsedAST>
+@@ -245,11 +245,24 @@ llvm::Optional<ParsedAST>
  ParsedAST::build(llvm::StringRef Filename, const ParseInputs &Inputs,
                   std::unique_ptr<clang::CompilerInvocation> CI,
                   llvm::ArrayRef<Diag> CompilerInvocationDiags,
@@ -1616,6 +1640,12 @@ index 0d7e4631d660..249c84c351ef 100644
    SPAN_ATTACH(Tracer, "File", Filename);
  
    auto VFS = Inputs.TFS->view(Inputs.CompileCommand.Directory);
++  if (Inputs.DraftFS) {
++    IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
++        new llvm::vfs::OverlayFileSystem(VFS)); 
++    Overlay->pushOverlay(Inputs.DraftFS);      
++    VFS = Overlay;
++  }
 +  if (PCHAccess && *PCHAccess) 
 +  {
 +    Preamble = nullptr;
@@ -1697,7 +1727,7 @@ index 5b9d17840214..8b86d7c1e778 100644
  /// Returns true if \p Preamble is reusable for \p Inputs. Note that it will
  /// return true when some missing headers are now available.
 diff --git a/clang-tools-extra/clangd/TUScheduler.cpp b/clang-tools-extra/clangd/TUScheduler.cpp
-index 435deb6ec162..582c42f28631 100644
+index 09c68a3a250b..f9676a9c7f8e 100644
 --- a/clang-tools-extra/clangd/TUScheduler.cpp
 +++ b/clang-tools-extra/clangd/TUScheduler.cpp
 @@ -50,6 +50,7 @@
@@ -1793,7 +1823,7 @@ index 435deb6ec162..582c42f28631 100644
          ++ASTBuildCount;
        }
        AST = NewAST ? std::make_unique<ParsedAST>(std::move(*NewAST)) : nullptr;
-@@ -931,7 +948,7 @@ void PreambleThread::build(Request Req) {
+@@ -932,7 +949,7 @@ void PreambleThread::build(Request Req) {
                                        const CanonicalIncludes &CanonIncludes) {
          Callbacks.onPreambleAST(FileName, Version, Ctx, std::move(PP),
                                  CanonIncludes);
@@ -1802,7 +1832,7 @@ index 435deb6ec162..582c42f28631 100644
    if (LatestBuild && isReliable(LatestBuild->CompileCommand))
      HeaderIncluders.update(FileName, LatestBuild->Includes.allHeaders());
  }
-@@ -1038,9 +1055,10 @@ void ASTWorker::generateDiagnostics(
+@@ -1039,9 +1056,10 @@ void ASTWorker::generateDiagnostics(
    llvm::Optional<std::unique_ptr<ParsedAST>> AST =
        IdleASTs.take(this, &ASTAccessForDiag);
    if (!AST || !InputsAreLatest) {
@@ -1814,7 +1844,7 @@ index 435deb6ec162..582c42f28631 100644
      auto RebuildDuration = DebouncePolicy::clock::now() - RebuildStartTime;
      ++ASTBuildCount;
      // Try to record the AST-build time, to inform future update debouncing.
-@@ -1445,8 +1463,8 @@ struct TUScheduler::FileData {
+@@ -1446,8 +1464,8 @@ struct TUScheduler::FileData {
  
  TUScheduler::TUScheduler(const GlobalCompilationDatabase &CDB,
                           const Options &Opts,
@@ -1825,7 +1855,7 @@ index 435deb6ec162..582c42f28631 100644
        Callbacks(Callbacks ? move(Callbacks)
                            : std::make_unique<ParsingCallbacks>()),
        Barrier(Opts.AsyncThreadsCount), QuickRunBarrier(Opts.AsyncThreadsCount),
-@@ -1496,7 +1514,7 @@ bool TUScheduler::update(PathRef File, ParseInputs Inputs,
+@@ -1497,7 +1515,7 @@ bool TUScheduler::update(PathRef File, ParseInputs Inputs,
      ASTWorkerHandle Worker =
          ASTWorker::create(File, CDB, *IdleASTs, *HeaderIncluders,
                            WorkerThreads ? WorkerThreads.getPointer() : nullptr,
@@ -1834,7 +1864,7 @@ index 435deb6ec162..582c42f28631 100644
      FD = std::unique_ptr<FileData>(
          new FileData{Inputs.Contents, std::move(Worker)});
      ContentChanged = true;
-@@ -1579,10 +1597,11 @@ void TUScheduler::runWithPreamble(llvm::StringRef Name, PathRef File,
+@@ -1590,10 +1608,11 @@ void TUScheduler::runWithPreamble(llvm::StringRef Name, PathRef File,
      std::shared_ptr<const ASTSignals> Signals;
      std::shared_ptr<const PreambleData> Preamble =
          It->second->Worker->getPossiblyStalePreamble(&Signals);
@@ -1847,7 +1877,7 @@ index 435deb6ec162..582c42f28631 100644
      return;
    }
  
-@@ -1594,7 +1613,8 @@ void TUScheduler::runWithPreamble(llvm::StringRef Name, PathRef File,
+@@ -1605,7 +1624,8 @@ void TUScheduler::runWithPreamble(llvm::StringRef Name, PathRef File,
                                                 std::string(File)),
                 Action = std::move(Action), this]() mutable {
      std::shared_ptr<const PreambleData> Preamble;
@@ -1857,7 +1887,7 @@ index 435deb6ec162..582c42f28631 100644
        // Wait until the preamble is built for the first time, if preamble
        // is required. This avoids extra work of processing the preamble
        // headers in parallel multiple times.
-@@ -1608,7 +1628,7 @@ void TUScheduler::runWithPreamble(llvm::StringRef Name, PathRef File,
+@@ -1619,7 +1639,7 @@ void TUScheduler::runWithPreamble(llvm::StringRef Name, PathRef File,
      trace::Span Tracer(Name);
      SPAN_ATTACH(Tracer, "file", File);
      WithContext WithProvidedContext(Opts.ContextProvider(File));
@@ -1867,7 +1897,7 @@ index 435deb6ec162..582c42f28631 100644
  
    PreambleTasks->runAsync("task:" + llvm::sys::path::filename(File),
 diff --git a/clang-tools-extra/clangd/TUScheduler.h b/clang-tools-extra/clangd/TUScheduler.h
-index 8df2c019053e..4e93cda38ecb 100644
+index 02b602173ae6..a9e3e71122ed 100644
 --- a/clang-tools-extra/clangd/TUScheduler.h
 +++ b/clang-tools-extra/clangd/TUScheduler.h
 @@ -13,6 +13,7 @@
@@ -1878,7 +1908,7 @@ index 8df2c019053e..4e93cda38ecb 100644
  #include "index/CanonicalIncludes.h"
  #include "support/Function.h"
  #include "support/MemoryTree.h"
-@@ -46,6 +47,7 @@ struct InputsAndPreamble {
+@@ -47,6 +48,7 @@ struct InputsAndPreamble {
    const PreambleData *Preamble;
    // This can be nullptr if no ASTSignals are available.
    const ASTSignals *Signals;
@@ -1886,7 +1916,7 @@ index 8df2c019053e..4e93cda38ecb 100644
  };
  
  /// Determines whether diagnostics should be generated for a file snapshot.
-@@ -203,7 +205,7 @@ public:
+@@ -209,7 +211,7 @@ public:
    };
  
    TUScheduler(const GlobalCompilationDatabase &CDB, const Options &Opts,
@@ -1895,7 +1925,7 @@ index 8df2c019053e..4e93cda38ecb 100644
    ~TUScheduler();
  
    struct FileStats {
-@@ -326,6 +328,7 @@ private:
+@@ -332,6 +334,7 @@ private:
  
    const GlobalCompilationDatabase &CDB;
    Options Opts;
@@ -2187,7 +2217,7 @@ index 6955fa0caa25..be88fc119e88 100644
  } // namespace clangd
  } // namespace clang
 diff --git a/clang-tools-extra/clangd/unittests/CodeCompleteTests.cpp b/clang-tools-extra/clangd/unittests/CodeCompleteTests.cpp
-index e4e56f2b5e38..94f6992649a7 100644
+index 78f6e7c4aa9f..2ed608a989da 100644
 --- a/clang-tools-extra/clangd/unittests/CodeCompleteTests.cpp
 +++ b/clang-tools-extra/clangd/unittests/CodeCompleteTests.cpp
 @@ -122,7 +122,7 @@ CodeCompleteResult completions(const TestTU &TU, Position Point,
@@ -2307,10 +2337,10 @@ index 70a14241a8ac..24ca916153fb 100644
  
  std::string getPreamblePatch(llvm::StringRef Baseline,
 diff --git a/clang-tools-extra/clangd/unittests/TestTU.cpp b/clang-tools-extra/clangd/unittests/TestTU.cpp
-index b0c0d1b7c2a1..24d810dc89b6 100644
+index 36f4290bd5a3..767404caedca 100644
 --- a/clang-tools-extra/clangd/unittests/TestTU.cpp
 +++ b/clang-tools-extra/clangd/unittests/TestTU.cpp
-@@ -109,7 +109,7 @@ ParsedAST TestTU::build() const {
+@@ -110,7 +110,7 @@ ParsedAST TestTU::build() const {
                                                 /*StoreInMemory=*/true,
                                                 /*PreambleCallback=*/nullptr);
    auto AST = ParsedAST::build(testPath(Filename), Inputs, std::move(CI),
