@@ -546,10 +546,10 @@ index b6e2fa3bccdf..54aa309a83a6 100644
  /// Gets compile args from tooling::CompilationDatabases built for parent
 diff --git a/clang-tools-extra/clangd/PCHManager.cpp b/clang-tools-extra/clangd/PCHManager.cpp
 new file mode 100644
-index 000000000000..990513ec9760
+index 000000000000..3b837d4bf123
 --- /dev/null
 +++ b/clang-tools-extra/clangd/PCHManager.cpp
-@@ -0,0 +1,757 @@
+@@ -0,0 +1,771 @@
 +#include "PCHManager.h"
 +#include "Preamble.h"
 +#include "TUScheduler.h"
@@ -937,7 +937,6 @@ index 000000000000..990513ec9760
 +
 +    ItemState = PCHItem::State::Rebuild;
 +    ++Version;
-+    PCHData.clear();
 +    // all dependencies must be invalidated
 +    for (PCHItem *Dep : DependOnMe)
 +      Res += Dep->invalidate(Lock);
@@ -985,13 +984,20 @@ index 000000000000..990513ec9760
 +
 +IntrusiveRefCntPtr<llvm::vfs::FileSystem>
 +PCHManager::addDependencies(const PCHItem *Dep,
-+                            IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS) {
++                            IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, 
++                            UsedPCHDataList &pchdatas) {
 +  IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> PCHFS(
 +      new llvm::vfs::InMemoryFileSystem());
 +  while (Dep) {
-+    auto Buf = llvm::MemoryBuffer::getMemBuffer(Dep->PCHData);
-+    PCHFS->addFile(Dep->CompileCommand.Filename + ".pch", 0, std::move(Buf));
-+    Dep = Dep->IdependOn.empty() ? nullptr : Dep->IdependOn[0];
++    auto data = Dep->PCHData;
++    if (data) {
++		pchdatas.emplace_back(data);
++		auto Buf = llvm::MemoryBuffer::getMemBuffer(*data);
++		PCHFS->addFile(Dep->CompileCommand.Filename + ".pch", 0, std::move(Buf));
++		Dep = Dep->IdependOn.empty() ? nullptr : Dep->IdependOn[0];
++    }else {
++      elog("(PCH) empty data on dependency {0}!!! (Status: {1})", Dep->CompileCommand.Filename, (int)Dep->ItemState);
++    }
 +  }
 +
 +  IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> Overlay(
@@ -1069,10 +1075,12 @@ index 000000000000..990513ec9760
 +    Overlay->pushOverlay(FS);                 // FS is secondary
 +    VFS = Overlay;
 +  }
++
++  UsedPCHDataList UsedPCHDatas;
 +  if (Dep) {
 +    PreprocessorOpts.ImplicitPCHInclude =
 +        std::string(Dep->CompileCommand.Filename) + ".pch";
-+    VFS = addDependencies(Dep, VFS);
++    VFS = addDependencies(Dep, VFS, UsedPCHDatas);
 +  }
 +
 +  CppFilePreambleCallbacks SerializedDeclsCollector(
@@ -1152,8 +1160,9 @@ index 000000000000..990513ec9760
 +
 +  Clang->getLangOpts().CompilingPCH = true;
 +
++  std::shared_ptr<std::string> newPCH = std::make_shared<std::string>();
 +  std::unique_ptr<PrecompilePCHAction> Act;
-+  Act.reset(new PrecompilePCHAction(&Item.PCHData, Callbacks));
++  Act.reset(new PrecompilePCHAction(&*newPCH, Callbacks));
 +  Callbacks.BeforeExecute(*Clang);
 +  if (!Act->BeginSourceFile(*Clang.get(), Clang->getFrontendOpts().Inputs[0])) {
 +    elog("(PCH)Failed to start processing {0}", Item.CompileCommand.Filename);
@@ -1186,9 +1195,10 @@ index 000000000000..990513ec9760
 +
 +  Item.Includes = SerializedDeclsCollector.takeIncludes();
 +  Item.CanonIncludes = SerializedDeclsCollector.takeCanonicalIncludes();
++  Item.PCHData = newPCH;
 +  S = PCHItem::State::Valid;
 +  log("(PCH)Successfully generated precompiled header of size: {0} (file: {1}; Version: {2})",
-+      Item.PCHData.size(), Item.CompileCommand.Filename, Item.Version);
++      Item.PCHData->size(), Item.CompileCommand.Filename, Item.Version);
 +}
 +
 +void PCHManager::rebuildInvalidatedPCH(unsigned Total, FSType FS) {
@@ -1257,8 +1267,11 @@ index 000000000000..990513ec9760
 +
 +  for (const auto &I : PCHs) {
 +    if (I->CompileCommand.Filename == PCHFile) {
-+      if (I->ItemState == PCHItem::State::Rebuild)
-+        I->CV.wait(Lock, [&] { return I->ItemState != PCHItem::State::Rebuild; });
++      if (I->ItemState == PCHItem::State::Rebuild) {
++        auto data = I->PCHData;
++        if (data->empty())//if it's empty - we wait. If there's some old PCH - we use it right away to avoid delays
++			I->CV.wait(Lock, [&] { return I->ItemState != PCHItem::State::Rebuild; });
++      }
 +
 +      if (I->ItemState == PCHItem::State::Invalid)
 +        return {};
@@ -1281,7 +1294,7 @@ index 000000000000..990513ec9760
 +        DisableValidationForModuleKind::PCH;
 +    pp.ImplicitPCHInclude =
 +        std::string(Item->CompileCommand.Filename) + ".pch";
-+    VFS = addDependencies(Item, VFS);
++    VFS = addDependencies(Item, VFS, UsedPCHDatas);
 +    return true;
 +  }
 +  return false;
@@ -1292,7 +1305,7 @@ index 000000000000..990513ec9760
 +    ++Item->InUse;
 +}
 +
-+PCHManager::PCHAccess::PCHAccess(PCHAccess &&Rhs) : Item(Rhs.Item) {
++PCHManager::PCHAccess::PCHAccess(PCHAccess &&Rhs) : Item(Rhs.Item), UsedPCHDatas(std::move(Rhs.UsedPCHDatas)) {
 +  Rhs.Item = nullptr;
 +}
 +PCHManager::PCHAccess::~PCHAccess() {
@@ -1302,6 +1315,7 @@ index 000000000000..990513ec9760
 +
 +PCHManager::PCHAccess &PCHManager::PCHAccess::operator=(PCHAccess &&Rhs) {
 +  std::swap(Item, Rhs.Item);
++  UsedPCHDatas = std::move(Rhs.UsedPCHDatas);
 +  return *this;
 +}
 +
@@ -1310,10 +1324,10 @@ index 000000000000..990513ec9760
 \ No newline at end of file
 diff --git a/clang-tools-extra/clangd/PCHManager.h b/clang-tools-extra/clangd/PCHManager.h
 new file mode 100644
-index 000000000000..2193baa12933
+index 000000000000..a200a2a0f6e3
 --- /dev/null
 +++ b/clang-tools-extra/clangd/PCHManager.h
-@@ -0,0 +1,212 @@
+@@ -0,0 +1,214 @@
 +#ifndef LLVM_CLANG_TOOLS_EXTRA_CLANGD_PCHMANAGER_H
 +#define LLVM_CLANG_TOOLS_EXTRA_CLANGD_PCHMANAGER_H
 +
@@ -1408,6 +1422,7 @@ index 000000000000..2193baa12933
 +
 +  using shared_lck = std::shared_lock<std::shared_timed_mutex>;
 +  using uniq_lck = std::unique_lock<std::shared_timed_mutex>;
++  using UsedPCHDataList = std::vector<std::shared_ptr<std::string>>;
 +
 +  PCHManager(const GlobalCompilationDatabase &CDB, const ThreadsafeFS &TFS, ParsingCallbacks &Callbacks, const Options &Opts);
 +  ~PCHManager();
@@ -1432,6 +1447,7 @@ index 000000000000..2193baa12933
 +    PCHAccess(const PCHItem *Item);
 +
 +    const PCHItem *Item = nullptr;
++    mutable UsedPCHDataList UsedPCHDatas;
 +    friend class PCHManager;
 +  };
 +
@@ -1472,11 +1488,11 @@ index 000000000000..2193baa12933
 +    {
 +      enum class State {Valid, Rebuild, Invalid};
 +
-+        PCHItem(tooling::CompileCommand CC): CompileCommand(std::move(CC)) {}
++        PCHItem(tooling::CompileCommand CC): CompileCommand(std::move(CC)), PCHData(std::make_shared<std::string>()) {}
 +        unsigned invalidate(uniq_lck &Lock);
 +
 +        tooling::CompileCommand CompileCommand;
-+        std::string PCHData;
++        std::shared_ptr<std::string> PCHData;
 +        std::vector<PCHItem*> DependOnMe;
 +        std::vector<PCHItem*> IdependOn;
 +        IncludeStructure Includes;
@@ -1488,7 +1504,7 @@ index 000000000000..2193baa12933
 +    };
 +    void rebuildPCH(PCHItem &Item, FSType FS);
 +
-+    static IntrusiveRefCntPtr<llvm::vfs::FileSystem> addDependencies(const PCHItem *Dep, IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS);
++    static IntrusiveRefCntPtr<llvm::vfs::FileSystem> addDependencies(const PCHItem *Dep, IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, UsedPCHDataList &pchdatas);
 +
 +    using CDBWeak = std::weak_ptr<const tooling::CompilationDatabase>;
 +    using PCHItemList = std::vector<std::unique_ptr<PCHItem>>;
