@@ -51,7 +51,7 @@ index f70fd0018cfd..b158f0923da3 100644
      } else {
        assert(Stats.Completed == Stats.Enqueued);
 diff --git a/clang-tools-extra/clangd/ClangdServer.cpp b/clang-tools-extra/clangd/ClangdServer.cpp
-index 0f525f3b9a0a..6bb575ed6ea9 100644
+index 0f525f3b9a0a..0c77bf28ca71 100644
 --- a/clang-tools-extra/clangd/ClangdServer.cpp
 +++ b/clang-tools-extra/clangd/ClangdServer.cpp
 @@ -16,6 +16,7 @@
@@ -70,7 +70,7 @@ index 0f525f3b9a0a..6bb575ed6ea9 100644
  #include "index/CanonicalIncludes.h"
  #include "index/FileIndex.h"
  #include "index/Merge.h"
-@@ -160,12 +162,28 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
+@@ -160,12 +162,47 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
        Transient(Opts.ImplicitCancellation ? TUScheduler::InvalidateOnUpdate
                                            : TUScheduler::NoInvalidation),
        DirtyFS(std::make_unique<DraftStoreFS>(TFS, DraftMgr)) {
@@ -89,6 +89,25 @@ index 0f525f3b9a0a..6bb575ed6ea9 100644
 +  };
 +  PCHOpts.WaitForInit = Opts.PCHAlwaysWait;
 +  PrecompiledHeaderMgr = std::make_unique<PCHManager>(CDB, TFS, *ParseCB, PCHOpts);
++  PCHWasBuild = PrecompiledHeaderMgr->watch([this](PCHManager::PCHEvent const &E) {
++	vlog("PCH was built: {0}; Success: {1}", E.PCHPath, E.Success);
++    if (!E.Success)
++      return;
++    reparseOpenFilesIfNeeded([&](StringRef File) -> bool {
++	  vlog("After PCH update: checking {0}", File);
++      auto Cmd = this->CDB.getCompileCommand(File);
++      if (Cmd) {
++	    //log("After PCH update: found command for {0}", File);
++        bool r = PrecompiledHeaderMgr->hasPCHInDependencies(*Cmd, E.PCHPath);
++        if (r) {
++          log("PCH {0} updated. Updating {1} that depends on it", E.PCHPath,
++              File);
++        }
++        return r;
++      }
++      return false;
++    });
++  });
 +
    // Pass a callback into `WorkScheduler` to extract symbols from a newly
    // parsed file and rebuild the file index synchronously each time an AST
@@ -100,7 +119,7 @@ index 0f525f3b9a0a..6bb575ed6ea9 100644
    // Adds an index to the stack, at higher priority than existing indexes.
    auto AddIndex = [&](SymbolIndex *Idx) {
      if (this->Index != nullptr) {
-@@ -175,6 +193,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
+@@ -175,6 +212,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
        this->Index = Idx;
      }
    };
@@ -108,7 +127,7 @@ index 0f525f3b9a0a..6bb575ed6ea9 100644
    if (Opts.StaticIndex)
      AddIndex(Opts.StaticIndex);
    if (Opts.BackgroundIndex) {
-@@ -189,7 +208,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
+@@ -189,7 +227,7 @@ ClangdServer::ClangdServer(const GlobalCompilationDatabase &CDB,
          TFS, CDB,
          BackgroundIndexStorage::createDiskBackedStorageFactory(
              [&CDB](llvm::StringRef File) { return CDB.getProjectInfo(File); }),
@@ -117,7 +136,7 @@ index 0f525f3b9a0a..6bb575ed6ea9 100644
      AddIndex(BackgroundIdx.get());
    }
    if (DynamicIdx)
-@@ -222,10 +241,19 @@ ClangdServer::~ClangdServer() {
+@@ -222,10 +260,19 @@ ClangdServer::~ClangdServer() {
  
  void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
                                 llvm::StringRef Version,
@@ -138,7 +157,7 @@ index 0f525f3b9a0a..6bb575ed6ea9 100644
    // Compile command is set asynchronously during update, as it can be slow.
    ParseInputs Inputs;
    Inputs.TFS = &TFS;
-@@ -236,6 +264,7 @@ void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
+@@ -236,6 +283,7 @@ void ClangdServer::addDocument(PathRef File, llvm::StringRef Contents,
    Inputs.Index = Index;
    Inputs.ClangTidyProvider = ClangTidyProvider;
    Inputs.FeatureModules = FeatureModules;
@@ -146,7 +165,7 @@ index 0f525f3b9a0a..6bb575ed6ea9 100644
    bool NewFile = WorkScheduler->update(File, Inputs, WantDiags);
    // If we loaded Foo.h, we want to make sure Foo.cpp is indexed.
    if (NewFile && BackgroundIdx)
-@@ -357,7 +386,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
+@@ -357,7 +405,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
        return CB(llvm::make_error<CancelledError>(Reason));
  
      llvm::Optional<SpeculativeFuzzyFind> SpecFuzzyFind;
@@ -155,7 +174,7 @@ index 0f525f3b9a0a..6bb575ed6ea9 100644
        // No speculation in Fallback mode, as it's supposed to be much faster
        // without compiling.
        vlog("Build for file {0} is not ready. Enter fallback mode.", File);
-@@ -376,7 +405,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
+@@ -376,7 +424,7 @@ void ClangdServer::codeComplete(PathRef File, Position Pos,
      // FIXME(ibiryukov): even if Preamble is non-null, we may want to check
      // both the old and the new version in case only one of them matches.
      CodeCompleteResult Result = clangd::codeComplete(
@@ -164,7 +183,7 @@ index 0f525f3b9a0a..6bb575ed6ea9 100644
          SpecFuzzyFind ? SpecFuzzyFind.getPointer() : nullptr);
      {
        clang::clangd::trace::Span Tracer("Completion results callback");
-@@ -411,12 +440,12 @@ void ClangdServer::signatureHelp(PathRef File, Position Pos,
+@@ -411,12 +459,12 @@ void ClangdServer::signatureHelp(PathRef File, Position Pos,
        return CB(IP.takeError());
  
      const auto *PreambleData = IP->Preamble;
@@ -180,7 +199,7 @@ index 0f525f3b9a0a..6bb575ed6ea9 100644
  
    // Unlike code completion, we wait for a preamble here.
 diff --git a/clang-tools-extra/clangd/ClangdServer.h b/clang-tools-extra/clangd/ClangdServer.h
-index 7d98977a7056..3bb3436a0e35 100644
+index 7d98977a7056..dffd326561b2 100644
 --- a/clang-tools-extra/clangd/ClangdServer.h
 +++ b/clang-tools-extra/clangd/ClangdServer.h
 @@ -17,6 +17,7 @@
@@ -210,12 +229,13 @@ index 7d98977a7056..3bb3436a0e35 100644
  
    /// Remove \p File from list of tracked files, schedule a request to free
    /// resources associated with it. Pending diagnostics for closed files may not
-@@ -403,6 +407,8 @@ private:
+@@ -403,6 +407,9 @@ private:
    std::unique_ptr<BackgroundIndex> BackgroundIdx;
    // Storage for merged views of the various indexes.
    std::vector<std::unique_ptr<SymbolIndex>> MergedIdx;
 +  // If present, an index of symbols in open files. Read via *Index.
 +  std::unique_ptr<PCHManager> PrecompiledHeaderMgr;
++  PCHManager::PCHBuiltEvent::Subscription PCHWasBuild;
  
    // When set, provides clang-tidy options for a specific file.
    TidyProviderRef ClangTidyProvider;
@@ -546,10 +566,10 @@ index b6e2fa3bccdf..54aa309a83a6 100644
  /// Gets compile args from tooling::CompilationDatabases built for parent
 diff --git a/clang-tools-extra/clangd/PCHManager.cpp b/clang-tools-extra/clangd/PCHManager.cpp
 new file mode 100644
-index 000000000000..770d992b21ca
+index 000000000000..6c33b7027965
 --- /dev/null
 +++ b/clang-tools-extra/clangd/PCHManager.cpp
-@@ -0,0 +1,771 @@
+@@ -0,0 +1,802 @@
 +#include "PCHManager.h"
 +#include "Preamble.h"
 +#include "TUScheduler.h"
@@ -1014,6 +1034,9 @@ index 000000000000..770d992b21ca
 +      OnProgress(Stats{++Complete, Total});
 +    Item.ItemState = S;
 +    Item.CV.notify_all();
++	vlog("Broadcasting PCH was built: {0}; Success: {1}; (Subscribed: {2})", Item.CompileCommand.Filename, S == PCHItem::State::Valid, OnPCHBuilt.subscribed());
++    OnPCHBuilt.broadcast(
++        PCHEvent{Item.CompileCommand.Filename, S == PCHItem::State::Valid});
 +  });
 +
 +  PCHItem *Dep = Item.IdependOn.empty() ? nullptr : Item.IdependOn[0];
@@ -1240,6 +1263,34 @@ index 000000000000..770d992b21ca
 +  return findPCH(PCHFile);
 +}
 +
++bool PCHManager::hasPCHInDependencies(tooling::CompileCommand const& Cmd, PathRef PCHFile) const {
++  llvm::StringRef Dep = findPCHDependency(Cmd);
++  if (!Dep.empty()) {
++	  shared_lck Lock(PCHLock);
++	  log("(PCH) hasPCHInDependencies request for {0} (PCH in question: {1})", Cmd.Filename, PCHFile);
++
++	  for (const auto &I : PCHs) {
++            if (I->CompileCommand.Filename == Dep) {
++              if (I->CompileCommand.Filename == PCHFile)//reacting only on main
++              {
++				  log("(PCH) hasPCHInDependencies: found for {0} (PCH in question: {1})", Cmd.Filename, PCHFile);
++                return true;
++              }
++              /*
++              const PCHItem *pI = &*I;
++              while (pI) {
++                if (pI->CompileCommand.Filename == PCHFile) {
++                  return true;
++                }
++                pI = pI->IdependOn.empty() ? nullptr : pI->IdependOn[0];
++              }
++              */
++            }
++          }
++  }
++  return false;
++}
++
 +PCHManager::PCHAccess
 +PCHManager::findPCH(tooling::CompileCommand const &Cmd) const {
 +  // return {};
@@ -1324,10 +1375,10 @@ index 000000000000..770d992b21ca
 \ No newline at end of file
 diff --git a/clang-tools-extra/clangd/PCHManager.h b/clang-tools-extra/clangd/PCHManager.h
 new file mode 100644
-index 000000000000..a200a2a0f6e3
+index 000000000000..8f0f1d9dc8ee
 --- /dev/null
 +++ b/clang-tools-extra/clangd/PCHManager.h
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,225 @@
 +#ifndef LLVM_CLANG_TOOLS_EXTRA_CLANGD_PCHMANAGER_H
 +#define LLVM_CLANG_TOOLS_EXTRA_CLANGD_PCHMANAGER_H
 +
@@ -1406,7 +1457,25 @@ index 000000000000..a200a2a0f6e3
 +};
 +
 +class PCHManager {
-+  struct PCHItem;
++    using uniq_lck = std::unique_lock<std::shared_timed_mutex>;
++    struct PCHItem
++    {
++      enum class State {Valid, Rebuild, Invalid};
++
++        PCHItem(tooling::CompileCommand CC): CompileCommand(std::move(CC)), PCHData(std::make_shared<std::string>()) {}
++        unsigned invalidate(uniq_lck &Lock);
++
++        tooling::CompileCommand CompileCommand;
++        std::shared_ptr<std::string> PCHData;
++        std::vector<PCHItem*> DependOnMe;
++        std::vector<PCHItem*> IdependOn;
++        IncludeStructure Includes;
++        CanonicalIncludes CanonIncludes;
++        State ItemState = State::Rebuild;
++        int Version = 0;
++        mutable std::atomic<unsigned> InUse{0};
++        mutable std::condition_variable_any CV;
++    };
 +public:
 +  struct Stats {
 +    unsigned Completed = 0; // PCHs generated
@@ -1421,8 +1490,12 @@ index 000000000000..a200a2a0f6e3
 +  };
 +
 +  using shared_lck = std::shared_lock<std::shared_timed_mutex>;
-+  using uniq_lck = std::unique_lock<std::shared_timed_mutex>;
 +  using UsedPCHDataList = std::vector<std::shared_ptr<std::string>>;
++  struct PCHEvent {
++    PathRef PCHPath;
++    bool Success;
++  };
++  using PCHBuiltEvent = Event<PCHEvent>;
 +
 +  PCHManager(const GlobalCompilationDatabase &CDB, const ThreadsafeFS &TFS, ParsingCallbacks &Callbacks, const Options &Opts);
 +  ~PCHManager();
@@ -1461,6 +1534,12 @@ index 000000000000..a200a2a0f6e3
 +  PCHAccess tryFindPCH(tooling::CompileCommand const& Cmd) const;
 +  PCHAccess tryFindPCH(clang::clangd::PathRef PCHFile) const;
 +
++  bool hasPCHInDependencies(tooling::CompileCommand const& Cmd, PathRef PCHFile) const;
++
++  PCHBuiltEvent::Subscription watch(PCHBuiltEvent::Listener L) const {
++    return OnPCHBuilt.observe(std::move(L));
++  }
++
 +  private:
 +    void enqueue(const std::vector<std::string> &ChangedFiles, FSType FS) {
 +        Queue.push(changedFilesTask(ChangedFiles, FS));
@@ -1483,25 +1562,6 @@ index 000000000000..a200a2a0f6e3
 +    unsigned invalidateAffectedPCH(const std::vector<std::string> &ChangedFiles);
 +    void rebuildInvalidatedPCH(unsigned Tota, FSType FSl);
 +    void updateAllHeaders();
-+
-+    struct PCHItem
-+    {
-+      enum class State {Valid, Rebuild, Invalid};
-+
-+        PCHItem(tooling::CompileCommand CC): CompileCommand(std::move(CC)), PCHData(std::make_shared<std::string>()) {}
-+        unsigned invalidate(uniq_lck &Lock);
-+
-+        tooling::CompileCommand CompileCommand;
-+        std::shared_ptr<std::string> PCHData;
-+        std::vector<PCHItem*> DependOnMe;
-+        std::vector<PCHItem*> IdependOn;
-+        IncludeStructure Includes;
-+        CanonicalIncludes CanonIncludes;
-+        State ItemState = State::Rebuild;
-+        int Version = 0;
-+        mutable std::atomic<unsigned> InUse{0};
-+        mutable std::condition_variable_any CV;
-+    };
 +    void rebuildPCH(PCHItem &Item, FSType FS);
 +
 +    static IntrusiveRefCntPtr<llvm::vfs::FileSystem> addDependencies(const PCHItem *Dep, IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS, UsedPCHDataList &pchdatas);
@@ -1537,6 +1597,8 @@ index 000000000000..a200a2a0f6e3
 +
 +    unsigned Total=0;
 +    std::atomic<unsigned> Complete{0};
++
++    mutable PCHBuiltEvent OnPCHBuilt;
 +};
 +} // namespace clangd
 +} // namespace clang
@@ -2047,6 +2109,19 @@ index 5645569c9ae1..6cddc3510fa9 100644
        continue;
      }
      // A shard contains only edges for non main-file sources.
+diff --git a/clang-tools-extra/clangd/support/Function.h b/clang-tools-extra/clangd/support/Function.h
+index 936800d56985..0244cd2d030c 100644
+--- a/clang-tools-extra/clangd/support/Function.h
++++ b/clang-tools-extra/clangd/support/Function.h
+@@ -92,6 +92,8 @@ public:
+     assert(Listeners.empty());
+   }
+ 
++  unsigned subscribed() const { return ListenerCount; }
++
+ private:
+   static_assert(std::is_same<typename std::decay<T>::type, T>::value,
+                 "use a plain type: event values are always passed by const&");
 diff --git a/clang-tools-extra/clangd/tool/Check.cpp b/clang-tools-extra/clangd/tool/Check.cpp
 index 89487bd8607f..0b9ba6622460 100644
 --- a/clang-tools-extra/clangd/tool/Check.cpp
