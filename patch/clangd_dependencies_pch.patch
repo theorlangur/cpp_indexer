@@ -2307,7 +2307,7 @@ index 5645569c9ae1..6cddc3510fa9 100644
      }
      // A shard contains only edges for non main-file sources.
 diff --git a/clang-tools-extra/clangd/tool/Check.cpp b/clang-tools-extra/clangd/tool/Check.cpp
-index 89487bd8607f..0b9ba6622460 100644
+index 88eb945d20d4..b969bde5ee89 100644
 --- a/clang-tools-extra/clangd/tool/Check.cpp
 +++ b/clang-tools-extra/clangd/tool/Check.cpp
 @@ -176,7 +176,7 @@ public:
@@ -2319,11 +2319,20 @@ index 89487bd8607f..0b9ba6622460 100644
      if (!AST) {
        elog("Failed to build AST");
        return false;
+@@ -240,7 +240,7 @@ public:
+ 
+       if (EnableCodeCompletion) {
+         Position EndPos = offsetToPosition(Inputs.Contents, End);
+-        auto CC = codeComplete(File, EndPos, Preamble.get(), Inputs, CCOpts);
++        auto CC = codeComplete(File, EndPos, Preamble.get(), Inputs, {}, CCOpts);
+         vlog("    code completion: {0}",
+              CC.Completions.empty() ? "<empty>" : CC.Completions[0].Name);
+       }
 diff --git a/clang-tools-extra/clangd/tool/ClangdMain.cpp b/clang-tools-extra/clangd/tool/ClangdMain.cpp
-index f0aa89b8091f..0c22f855719e 100644
+index 0f9e5c89e42c..1fd76f72da94 100644
 --- a/clang-tools-extra/clangd/tool/ClangdMain.cpp
 +++ b/clang-tools-extra/clangd/tool/ClangdMain.cpp
-@@ -382,6 +382,13 @@ opt<PCHStorageFlag> PCHStorage{
+@@ -383,6 +383,13 @@ opt<PCHStorageFlag> PCHStorage{
      init(PCHStorageFlag::Disk),
  };
  
@@ -2337,7 +2346,7 @@ index f0aa89b8091f..0c22f855719e 100644
  opt<bool> Sync{
      "sync",
      cat(Misc),
-@@ -808,6 +815,8 @@ clangd accepts flags on the commandline, and in the CLANGD_FLAGS environment var
+@@ -809,6 +816,8 @@ clangd accepts flags on the commandline, and in the CLANGD_FLAGS environment var
      Opts.StorePreamblesInMemory = false;
      break;
    }
